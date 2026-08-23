@@ -35,7 +35,7 @@ struct PersonaAvatarView: View {
             Circle()
                 .strokeBorder(color.tint.opacity(0.30), lineWidth: 0.8)
         }
-        .accessibilityLabel("Аватар агента \(displayName)")
+        .accessibilityLabel(AppLocalization.string("Аватар агента \(displayName)"))
     }
 
     private var avatarImage: NSImage? {
@@ -44,7 +44,7 @@ struct PersonaAvatarView: View {
 
     private var displayName: String {
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.isEmpty ? "Агент" : trimmed
+        return trimmed.isEmpty ? AppLocalization.string("Агент") : trimmed
     }
 
     private var initial: String {
@@ -69,7 +69,11 @@ struct PersonaAvatarEditor: View {
                 )
 
                 VStack(alignment: .leading, spacing: 6) {
-                    Text(imageData == nil ? "Добавьте фотографию" : "Фото загружено")
+                    Text(
+                        imageData == nil
+                            ? AppLocalization.string("Добавьте фотографию")
+                            : AppLocalization.string("Фото загружено")
+                    )
                         .font(.callout.weight(.medium))
                         .lineLimit(2)
                     Text("PNG, JPG или HEIC · до 25 МБ")
@@ -116,7 +120,7 @@ struct PersonaAvatarEditor: View {
                                 }
                         }
                         .buttonStyle(.plain)
-                        .accessibilityLabel("Цвет \(option.title)")
+                        .accessibilityLabel(AppLocalization.string("Цвет \(option.title)"))
                     }
                 }
             }
@@ -127,7 +131,9 @@ struct PersonaAvatarEditor: View {
     private var choosePhotoButton: some View {
         Button(action: onChoosePhoto) {
             Label(
-                imageData == nil ? "Загрузить фото…" : "Заменить фото…",
+                imageData == nil
+                    ? AppLocalization.string("Загрузить фото…")
+                    : AppLocalization.string("Заменить фото…"),
                 systemImage: "photo.badge.plus"
             )
             .lineLimit(1)
@@ -237,11 +243,11 @@ private enum PersonaAvatarImageError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .imageTooLarge:
-            "Файл больше 25 МБ. Выберите изображение поменьше."
+            AppLocalization.string("Файл больше 25 МБ. Выберите изображение поменьше.")
         case .invalidImage:
-            "Этот файл не удалось распознать как изображение."
+            AppLocalization.string("Этот файл не удалось распознать как изображение.")
         case .processingFailed:
-            "Изображение не удалось подготовить для аватара."
+            AppLocalization.string("Изображение не удалось подготовить для аватара.")
         }
     }
 }
@@ -260,12 +266,12 @@ extension AgentAvatarColor {
 
     var title: String {
         switch self {
-        case .indigo: "Индиго"
-        case .blue: "Синий"
-        case .teal: "Бирюзовый"
-        case .green: "Зелёный"
-        case .orange: "Оранжевый"
-        case .pink: "Розовый"
+        case .indigo: AppLocalization.string("Индиго")
+        case .blue: AppLocalization.string("Синий")
+        case .teal: AppLocalization.string("Бирюзовый")
+        case .green: AppLocalization.string("Зелёный")
+        case .orange: AppLocalization.string("Оранжевый")
+        case .pink: AppLocalization.string("Розовый")
         }
     }
 }

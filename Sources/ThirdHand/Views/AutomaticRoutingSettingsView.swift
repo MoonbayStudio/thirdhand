@@ -38,9 +38,7 @@ struct AutomaticRoutingSettingsView: View {
                     }
                     .padding(.vertical, 3)
                 }
-            }
 
-            Section {
                 Text("В режиме Авто Third Hand идёт сверху вниз и переключается только после подтверждённой ошибки лимита. Ошибки сети, авторизации и разрешений не запускают другого агента автоматически.")
                     .font(.caption)
                     .foregroundStyle(.secondary)

@@ -8,6 +8,7 @@ enum OpenRouterAPIError: LocalizedError, Sendable {
     case invalidResponse
     case httpStatus(Int, String?)
     case emptyResponse
+    case emptyConversationResponse
     case malformedHandoff
 
     var errorDescription: String? {
@@ -22,6 +23,8 @@ enum OpenRouterAPIError: LocalizedError, Sendable {
             }
         case .emptyResponse:
             "OpenRouter не вернул сжатый контекст."
+        case .emptyConversationResponse:
+            "Бесплатная модель OpenRouter не вернула ответ."
         case .malformedHandoff:
             "OpenRouter вернул handoff в неподдерживаемом формате."
         }
@@ -81,9 +84,9 @@ struct OpenRouterAPIClient: Sendable {
             messages: [
                 ChatCompletionMessage(
                     role: "system",
-                    content: """
-                    You compile loss-minimizing handoffs between coding agents. Return only one JSON object with exactly these fields: decisions, progress, knownIssues, nextStep. The first three fields are arrays of at most four short factual strings. nextStep is one concrete action. Preserve constraints and uncertainty, do not invent completed work, do not include code or Markdown fences.
-                    """
+                    content: compressionSystemPrompt(
+                        for: compressionRequest.interactionMode
+                    )
                 ),
                 ChatCompletionMessage(
                     role: "user",
@@ -106,6 +109,60 @@ struct OpenRouterAPIClient: Sendable {
             content,
             modelID: modelID
         )
+    }
+
+    func completeConversation(
+        apiKey: String,
+        modelID: String = OpenRouterPreferences.freeConversationModelID,
+        prompt: String
+    ) async throws -> OpenRouterConversationResponse {
+        var request = try authorizedRequest(
+            path: "chat/completions",
+            method: "POST",
+            apiKey: apiKey
+        )
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONEncoder().encode(
+            ChatCompletionRequest(
+                model: modelID,
+                messages: [
+                    ChatCompletionMessage(
+                        role: "user",
+                        content: prompt
+                    )
+                ],
+                temperature: 0.8,
+                maxTokens: 1_200
+            )
+        )
+
+        let data = try await responseData(for: request)
+        let response = try JSONDecoder().decode(ChatCompletionResponse.self, from: data)
+        guard let content = response.choices.first?.message.content
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+              !content.isEmpty
+        else {
+            throw OpenRouterAPIError.emptyConversationResponse
+        }
+        return OpenRouterConversationResponse(
+            text: content,
+            modelID: response.model ?? modelID
+        )
+    }
+
+    private func compressionSystemPrompt(
+        for interactionMode: AgentInteractionMode
+    ) -> String {
+        switch interactionMode {
+        case .conversation:
+            """
+            You compile loss-minimizing handoffs between conversational AI personas. Return only one JSON object with exactly these fields: decisions, progress, knownIssues, nextStep. The first three fields are arrays of at most four short factual strings. Use decisions for stable user facts or preferences, progress for recent conversational context, knownIssues for open topics or sensitivities, and nextStep for the most natural next reply. Preserve tone and uncertainty. Do not introduce software-development framing, repositories, Git, file checks, or Markdown fences.
+            """
+        case .automatic, .workspace:
+            """
+            You compile loss-minimizing handoffs between coding agents. Return only one JSON object with exactly these fields: decisions, progress, knownIssues, nextStep. The first three fields are arrays of at most four short factual strings. nextStep is one concrete action. Preserve constraints and uncertainty, do not invent completed work, do not include code or Markdown fences.
+            """
+        }
     }
 
     private func authorizedRequest(
@@ -174,6 +231,38 @@ struct OpenRouterHandoffService: AgentHandoffCompressing {
             apiKey: apiKey,
             modelID: configuration.modelID,
             request: request
+        )
+    }
+}
+
+struct OpenRouterConversationService: OpenRouterConversationResponding {
+    private let client: OpenRouterAPIClient
+    private let credentialStore: any OpenRouterCredentialStoring
+    private let configurationProvider: @Sendable () -> OpenRouterConversationConfiguration
+
+    init(
+        client: OpenRouterAPIClient = OpenRouterAPIClient(),
+        credentialStore: any OpenRouterCredentialStoring = KeychainOpenRouterCredentialStore(),
+        configurationProvider: @escaping @Sendable () -> OpenRouterConversationConfiguration = {
+            OpenRouterPreferences.loadConversation()
+        }
+    ) {
+        self.client = client
+        self.credentialStore = credentialStore
+        self.configurationProvider = configurationProvider
+    }
+
+    func respond(
+        to request: OpenRouterConversationRequest
+    ) async throws -> OpenRouterConversationResponse? {
+        guard configurationProvider().isEnabled,
+              let apiKey = try credentialStore.loadAPIKey()
+        else {
+            return nil
+        }
+        return try await client.completeConversation(
+            apiKey: apiKey,
+            prompt: request.prompt
         )
     }
 }
@@ -272,6 +361,7 @@ private struct ChatCompletionResponse: Decodable {
         let message: ChatCompletionMessage
     }
 
+    let model: String?
     let choices: [Choice]
 }
 

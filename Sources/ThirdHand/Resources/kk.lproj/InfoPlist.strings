@@ -1,0 +1,3 @@
+"CFBundleDisplayName" = "Third Hand";
+"NSMicrophoneUsageDescription" = "Third Hand микрофонды хабарламаны дауыспен енгізу кезінде ғана пайдаланады.";
+"NSSpeechRecognitionUsageDescription" = "Third Hand диктант хабарламаны өңделетін мәтінге түрлендіреді.";

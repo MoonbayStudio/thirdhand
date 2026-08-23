@@ -20,6 +20,9 @@ struct RootView: View {
                         Group {
                             if let agent = store.selectedTask {
                                 TaskDetailView(task: agent)
+                            } else if let group = store.selectedGroupChat {
+                                GroupChatDetailView(group: group)
+                                    .id(group.id)
                             } else {
                                 EmptyTaskView()
                             }
@@ -36,11 +39,14 @@ struct RootView: View {
                             if let agent = store.selectedTask {
                                 AgentProfileInspectorView(task: agent)
                                     .id(agent.id)
+                            } else if let group = store.selectedGroupChat {
+                                GroupChatInspectorView(group: group)
+                                    .id(group.id)
                             } else {
                                 ContentUnavailableView {
-                                    Label("Профиль агента", systemImage: "person.crop.circle")
+                                    Label("Параметры чата", systemImage: "sidebar.trailing")
                                 } description: {
-                                    Text("Выберите или создайте агента.")
+                                    Text("Выберите агента или групповой чат.")
                                 }
                             }
                         }
@@ -61,9 +67,15 @@ struct RootView: View {
                 MacWindowChromeConfigurator(
                     title: store.isShowingSettings
                         ? "Настройки"
-                        : store.selectedTask?.title ?? "Third Hand"
+                        : store.selectedTask?.title
+                            ?? store.selectedGroupChat?.title
+                            ?? "Third Hand"
                 )
             )
+            .sheet(isPresented: $store.isShowingNewGroupChatSheet) {
+                NewGroupChatSheet()
+                    .environment(store)
+            }
             .alert(
                 "Удалить агента?",
                 isPresented: Binding(
@@ -79,6 +91,22 @@ struct RootView: View {
                 }
             } message: {
                 Text(deletionMessage)
+            }
+            .alert(
+                "Удалить групповой чат?",
+                isPresented: Binding(
+                    get: { store.groupChatPendingDeletion != nil },
+                    set: { if !$0 { store.cancelGroupChatDeletion() } }
+                )
+            ) {
+                Button("Удалить", role: .destructive) {
+                    store.confirmGroupChatDeletion()
+                }
+                Button("Отмена", role: .cancel) {
+                    store.cancelGroupChatDeletion()
+                }
+            } message: {
+                Text(groupDeletionMessage)
             }
             .alert(
                 "Third Hand требует внимания",
@@ -100,14 +128,23 @@ struct RootView: View {
         guard let taskID = store.taskPendingDeletion,
               let agent = store.tasks.first(where: { $0.id == taskID })
         else {
-            return "Будет удалён профиль и история чата. Файлы рабочей папки останутся на месте."
+            return AppLocalization.string("Будет удалён профиль и история чата. Файлы рабочей папки останутся на месте.")
         }
-        return "«\(agent.title)» и история этого чата будут удалены из Third Hand. Репозиторий и его файлы останутся на месте."
+        return AppLocalization.string("«\(agent.title)» и история этого чата будут удалены из Third Hand. Репозиторий и его файлы останутся на месте.")
+    }
+
+    private var groupDeletionMessage: String {
+        guard let groupID = store.groupChatPendingDeletion,
+              let group = store.groupChats.first(where: { $0.id == groupID })
+        else {
+            return "Будет удалена история группового обсуждения. Профили агентов останутся на месте."
+        }
+        return "«\(group.title)» и вся история обсуждения будут удалены. Профили участников останутся в Third Hand."
     }
 
     private func adaptColumns(to width: CGFloat) {
-        if width < 1_100, columnVisibility != .doubleColumn {
-            columnVisibility = .doubleColumn
+        if width < 1_100, columnVisibility != .detailOnly {
+            columnVisibility = .detailOnly
         } else if width > 1_180, columnVisibility != .all {
             columnVisibility = .all
         }

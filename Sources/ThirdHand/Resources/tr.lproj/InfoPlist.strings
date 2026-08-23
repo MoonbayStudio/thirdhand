@@ -1,0 +1,3 @@
+"CFBundleDisplayName" = "Third Hand";
+"NSMicrophoneUsageDescription" = "Third Hand mikrofonu yalnızca siz bir mesajı dikte ederken kullanır.";
+"NSSpeechRecognitionUsageDescription" = "Third Hand dikte edilen mesajınızı düzenlenebilir metne dönüştürür.";

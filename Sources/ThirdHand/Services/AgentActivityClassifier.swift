@@ -18,35 +18,35 @@ enum AgentActivityStage: String, CaseIterable, Hashable, Identifiable, Sendable 
 
     var title: String {
         switch self {
-        case .preparing: "Готовит контекст"
-        case .compressingContext: "Сжимает handoff"
-        case .analyzing: "Анализирует задачу"
-        case .readingFiles: "Читает файлы"
-        case .readingSources: "Читает источники"
-        case .searching: "Ищет по проекту"
-        case .runningCommand: "Выполняет команду"
-        case .editing: "Вносит изменения"
-        case .verifying: "Проверяет результат"
-        case .responding: "Формирует ответ"
-        case .working: "Работает над задачей"
-        case .stopping: "Останавливается"
+        case .preparing: AppLocalization.string("Готовит контекст")
+        case .compressingContext: AppLocalization.string("Сжимает handoff")
+        case .analyzing: AppLocalization.string("Анализирует задачу")
+        case .readingFiles: AppLocalization.string("Читает файлы")
+        case .readingSources: AppLocalization.string("Читает источники")
+        case .searching: AppLocalization.string("Ищет по проекту")
+        case .runningCommand: AppLocalization.string("Выполняет команду")
+        case .editing: AppLocalization.string("Вносит изменения")
+        case .verifying: AppLocalization.string("Проверяет результат")
+        case .responding: AppLocalization.string("Формирует ответ")
+        case .working: AppLocalization.string("Работает над задачей")
+        case .stopping: AppLocalization.string("Останавливается")
         }
     }
 
     var detail: String {
         switch self {
-        case .preparing: "Собирает Task, Git-снимок и handoff"
-        case .compressingContext: "OpenRouter готовит компактный контекст для следующего агента"
-        case .analyzing: "Определяет следующий шаг"
-        case .readingFiles: "Изучает содержимое репозитория"
-        case .readingSources: "Просматривает внешние материалы"
-        case .searching: "Находит нужный код и контекст"
-        case .runningCommand: "Использует CLI-инструменты"
-        case .editing: "Обновляет файлы рабочего дерева"
-        case .verifying: "Запускает сборку или тесты"
-        case .responding: "Собирает итог для чата"
-        case .working: "CLI пока не сообщил точное действие"
-        case .stopping: "Завершает текущий процесс"
+        case .preparing: AppLocalization.string("Собирает Task, Git-снимок и handoff")
+        case .compressingContext: AppLocalization.string("API-модель готовит компактный контекст для следующего агента")
+        case .analyzing: AppLocalization.string("Определяет следующий шаг")
+        case .readingFiles: AppLocalization.string("Изучает содержимое репозитория")
+        case .readingSources: AppLocalization.string("Просматривает внешние материалы")
+        case .searching: AppLocalization.string("Находит нужный код и контекст")
+        case .runningCommand: AppLocalization.string("Использует CLI-инструменты")
+        case .editing: AppLocalization.string("Обновляет файлы рабочего дерева")
+        case .verifying: AppLocalization.string("Запускает сборку или тесты")
+        case .responding: AppLocalization.string("Собирает итог для чата")
+        case .working: AppLocalization.string("Исполнитель готовит ответ")
+        case .stopping: AppLocalization.string("Завершает текущий процесс")
         }
     }
 

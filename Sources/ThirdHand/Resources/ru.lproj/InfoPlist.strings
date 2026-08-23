@@ -1,0 +1,3 @@
+"CFBundleDisplayName" = "Third Hand";
+"NSMicrophoneUsageDescription" = "Third Hand использует микрофон только во время голосового ввода сообщения.";
+"NSSpeechRecognitionUsageDescription" = "Third Hand преобразует продиктованное сообщение в редактируемый текст.";

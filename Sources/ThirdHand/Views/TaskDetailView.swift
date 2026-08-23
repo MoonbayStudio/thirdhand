@@ -3,13 +3,26 @@ import UniformTypeIdentifiers
 
 struct TaskDetailView: View {
     @Environment(AppStore.self) private var store
+    @Environment(\.appAccessibilityOptions) private var accessibilityOptions
     let task: CodingTask
 
     @State private var draft = ""
     @State private var draftAttachments: [TaskAttachment] = []
     @State private var isShowingFileImporter = false
     @State private var isCurrentLiveOutputRevealed = false
+    @State private var voiceInput = VoiceInputController()
+    @State private var dictationBaseDraft = ""
     @AppStorage("showRawTerminalLogs") private var showRawTerminalLogs = false
+    @AppStorage(AppPreferenceKeys.voiceInputEnabled)
+    private var voiceInputEnabled = true
+    @AppStorage(AppPreferenceKeys.voiceRecognitionLanguage)
+    private var voiceRecognitionLanguage: VoiceRecognitionLanguage = .automatic
+    @AppStorage(AppPreferenceKeys.voiceAddsPunctuation)
+    private var voiceAddsPunctuation = true
+    @AppStorage(AppPreferenceKeys.voicePrefersOnDeviceRecognition)
+    private var voicePrefersOnDeviceRecognition = true
+    @AppStorage(AppPreferenceKeys.language)
+    private var appLanguage: AppLanguage = .russian
     @FocusState private var isComposerFocused: Bool
 
     private var canSend: Bool {
@@ -64,7 +77,9 @@ struct TaskDetailView: View {
                 toolbarIdentity
             }
 
-            if let activeRun, task.onboardingStage != .configuring {
+            if let activeRun,
+               activeRun.presentsDetailedActivity,
+               task.onboardingStage != .configuring {
                 ToolbarItem(placement: .primaryAction) {
                     AgentRunCapsule(
                         run: activeRun,
@@ -94,6 +109,9 @@ struct TaskDetailView: View {
         }
         .onChange(of: task.id) {
             isCurrentLiveOutputRevealed = false
+            voiceInput.cancel()
+            voiceInput.clearTranscript()
+            dictationBaseDraft = ""
         }
         .onChange(of: activeRun?.attemptID) {
             isCurrentLiveOutputRevealed = false
@@ -102,6 +120,22 @@ struct TaskDetailView: View {
             if stage == .awaitingIdentity {
                 isComposerFocused = true
             }
+        }
+        .onChange(of: voiceInput.transcript) { _, transcript in
+            guard !transcript.isEmpty else { return }
+            draft = composedDraft(base: dictationBaseDraft, transcript: transcript)
+        }
+        .onChange(of: voiceInput.errorMessage) { _, message in
+            guard let message else { return }
+            store.lastError = message
+        }
+        .onChange(of: voiceInputEnabled) { _, enabled in
+            if !enabled {
+                voiceInput.cancel()
+            }
+        }
+        .onDisappear {
+            voiceInput.cancel()
         }
         .fileImporter(
             isPresented: $isShowingFileImporter,
@@ -144,20 +178,26 @@ struct TaskDetailView: View {
         .fixedSize(horizontal: false, vertical: true)
         .accessibilityElement(children: .combine)
         .accessibilityLabel(
-            "Агент " + task.title + ", " + toolbarStatusTitle
+            AppLocalization.string("Агент \(task.title), \(toolbarStatusTitle)")
         )
     }
 
     private var toolbarStatusTitle: String {
         switch task.onboardingStage {
         case .introducing:
-            "Знакомится"
+            AppLocalization.string("Знакомится")
         case .awaitingIdentity:
-            "Ждёт описания"
+            AppLocalization.string("Ждёт описания")
         case .configuring:
-            "Настраивается"
+            AppLocalization.string("Настраивается")
         case nil:
-            activeRun == nil ? "В сети" : "Работает"
+            if let activeRun {
+                activeRun.presentsDetailedActivity
+                    ? AppLocalization.string("Работает")
+                    : AppLocalization.string("Печатает")
+            } else {
+                AppLocalization.string("В сети")
+            }
         }
     }
 
@@ -194,17 +234,25 @@ struct TaskDetailView: View {
                             )
                             .id(onboardingTypingID)
                         } else if let activeRun {
-                            AgentWorkingRow(
-                                run: activeRun,
-                                liveOutput: store.liveAgentOutputs[task.id],
-                                persona: task.effectivePersona,
-                                agentName: task.title,
-                                showsRawOutput: shouldShowLiveOutput,
-                                onRevealLiveOutput: {
-                                    isCurrentLiveOutputRevealed = true
-                                }
-                            )
+                            if activeRun.presentsDetailedActivity {
+                                AgentWorkingRow(
+                                    run: activeRun,
+                                    liveOutput: store.liveAgentOutputs[task.id],
+                                    persona: task.effectivePersona,
+                                    agentName: task.title,
+                                    showsRawOutput: shouldShowLiveOutput,
+                                    onRevealLiveOutput: {
+                                        isCurrentLiveOutputRevealed = true
+                                    }
+                                )
                                 .id(activeRun.attemptID)
+                            } else {
+                                AgentTypingRow(
+                                    persona: task.effectivePersona,
+                                    agentName: task.title
+                                )
+                                .id(activeRun.attemptID)
+                            }
                         }
                     }
                     .padding(.horizontal, 32)
@@ -215,28 +263,24 @@ struct TaskDetailView: View {
             }
             .onChange(of: task.chatMessages.count) { _, _ in
                 guard let lastMessageID = task.chatMessages.last?.id else { return }
-                withAnimation(.easeOut(duration: 0.2)) {
-                    proxy.scrollTo(lastMessageID, anchor: .bottom)
-                }
+                scrollToBottom(lastMessageID, using: proxy)
             }
             .onChange(of: activeRun) { _, run in
                 guard let run else { return }
-                withAnimation(.easeOut(duration: 0.2)) {
-                    proxy.scrollTo(run.attemptID, anchor: .bottom)
-                }
+                scrollToBottom(run.attemptID, using: proxy)
             }
             .onChange(of: task.onboardingStage) { _, stage in
                 guard stage == .introducing || stage == .configuring else { return }
-                withAnimation(.easeOut(duration: 0.2)) {
-                    proxy.scrollTo(onboardingTypingID, anchor: .bottom)
-                }
+                scrollToBottom(onboardingTypingID, using: proxy)
             }
         }
     }
 
     private var composer: some View {
         VStack(spacing: 8) {
-            if let activeRun, task.onboardingStage != .configuring {
+            if let activeRun,
+               activeRun.presentsDetailedActivity,
+               task.onboardingStage != .configuring {
                 AgentActivityAccessory(
                     run: activeRun,
                     output: store.liveAgentOutputs[task.id]
@@ -289,6 +333,47 @@ struct TaskDetailView: View {
                     .disabled(isComposerBlocked || task.onboardingStage != nil)
                     .help("Добавить файлы")
 
+                    if voiceInputEnabled {
+                        Button(action: toggleVoiceInput) {
+                            Image(systemName: voiceInput.isRecording ? "stop.fill" : "mic.fill")
+                                .font(.system(size: voiceInput.isRecording ? 10 : 12, weight: .semibold))
+                                .foregroundStyle(voiceInput.isRecording ? Color.white : Color.primary)
+                                .frame(width: 27, height: 27)
+                                .background(
+                                    voiceInput.isRecording
+                                        ? Color.red
+                                        : Color.secondary.opacity(0.12),
+                                    in: Circle()
+                                )
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(isComposerBlocked)
+                        .help(voiceInput.isRecording ? "Остановить голосовой ввод" : "Голосовой ввод")
+                        .accessibilityLabel(
+                            voiceInput.isRecording
+                                ? "Остановить голосовой ввод"
+                                : "Начать голосовой ввод"
+                        )
+                        .accessibilityValue(voiceInput.isRecording ? "Идёт запись" : "Не записывает")
+                        .accessibilityIdentifier("voice-input-button")
+
+                        if voiceInput.isRecording {
+                            HStack(spacing: 4) {
+                                Circle()
+                                    .fill(.red)
+                                    .frame(width: 6, height: 6)
+                                Text("Слушаю…")
+                                    .font(.caption2.weight(.medium))
+                                if voiceInput.usesOnDeviceRecognition {
+                                    Image(systemName: "desktopcomputer")
+                                        .accessibilityLabel("Распознавание на Mac")
+                                }
+                            }
+                            .foregroundStyle(.secondary)
+                            .accessibilityElement(children: .combine)
+                        }
+                    }
+
                     Spacer(minLength: 24)
 
                     AgentConfigurationMenu(task: task)
@@ -318,8 +403,8 @@ struct TaskDetailView: View {
                         .disabled(!canSubmit)
                         .help(
                             isRepositoryBusy
-                                ? "Сначала дождитесь завершения работы в репозитории"
-                                : "Отправить сообщение"
+                                ? AppLocalization.string("Сначала дождитесь завершения работы в репозитории")
+                                : AppLocalization.string("Отправить сообщение")
                         )
                     }
                 }
@@ -352,6 +437,9 @@ struct TaskDetailView: View {
         }
 
         let attachments = draftAttachments
+        voiceInput.stop()
+        voiceInput.clearTranscript()
+        dictationBaseDraft = ""
         draft = ""
         draftAttachments = []
         isComposerFocused = true
@@ -365,16 +453,58 @@ struct TaskDetailView: View {
         }
     }
 
+    private func toggleVoiceInput() {
+        if voiceInput.isRecording {
+            voiceInput.stop()
+            return
+        }
+
+        dictationBaseDraft = draft
+        isComposerFocused = true
+        let locale = voiceRecognitionLanguage.locale(appLanguage: appLanguage)
+
+        Swift.Task {
+            await voiceInput.start(
+                configuration: VoiceInputConfiguration(
+                    localeIdentifier: locale.identifier,
+                    addsPunctuation: voiceAddsPunctuation,
+                    prefersOnDeviceRecognition: voicePrefersOnDeviceRecognition
+                )
+            )
+        }
+    }
+
+    private func composedDraft(base: String, transcript: String) -> String {
+        guard !base.isEmpty else { return transcript }
+        guard let last = base.last, !last.isWhitespace else {
+            return base + transcript
+        }
+        return base + " " + transcript
+    }
+
+    private func scrollToBottom<ID: Hashable>(
+        _ id: ID,
+        using proxy: ScrollViewProxy
+    ) {
+        if accessibilityOptions.reduceMotion {
+            proxy.scrollTo(id, anchor: .bottom)
+        } else {
+            withAnimation(.easeOut(duration: 0.2)) {
+                proxy.scrollTo(id, anchor: .bottom)
+            }
+        }
+    }
+
     private var composerPlaceholder: String {
         switch task.onboardingStage {
         case .introducing:
-            "Секунду…"
+            AppLocalization.string("Секунду…")
         case .awaitingIdentity:
-            "Например: ты Муни, спокойный разработчик…"
+            AppLocalization.string("Например: ты Муни, спокойный разработчик…")
         case .configuring:
-            "Собираю профиль…"
+            AppLocalization.string("Собираю профиль…")
         case nil:
-            "Сообщение для \(task.title)…"
+            AppLocalization.string("Сообщение для \(task.title)…")
         }
     }
 

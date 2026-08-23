@@ -3,6 +3,8 @@ import Foundation
 enum OpenRouterPreferences {
     static let handoffEnabledKey = "openRouterHandoffEnabled"
     static let handoffModelIDKey = "openRouterHandoffModelID"
+    static let casualConversationEnabledKey = "openRouterCasualConversationEnabled"
+    static let freeConversationModelID = "openrouter/free"
 
     static func load(defaults: UserDefaults = .standard) -> OpenRouterHandoffConfiguration {
         OpenRouterHandoffConfiguration(
@@ -10,6 +12,15 @@ enum OpenRouterPreferences {
             modelID: defaults.string(forKey: handoffModelIDKey)?
                 .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         )
+    }
+
+    static func loadConversation(
+        defaults: UserDefaults = .standard
+    ) -> OpenRouterConversationConfiguration {
+        let isEnabled = defaults.object(forKey: casualConversationEnabledKey) == nil
+            ? true
+            : defaults.bool(forKey: casualConversationEnabledKey)
+        return OpenRouterConversationConfiguration(isEnabled: isEnabled)
     }
 }
 
@@ -19,6 +30,33 @@ struct OpenRouterHandoffConfiguration: Hashable, Sendable {
 
     var isReady: Bool {
         isEnabled && !modelID.isEmpty
+    }
+}
+
+struct OpenRouterConversationConfiguration: Hashable, Sendable {
+    let isEnabled: Bool
+}
+
+struct OpenRouterConversationRequest: Hashable, Sendable {
+    let prompt: String
+}
+
+struct OpenRouterConversationResponse: Hashable, Sendable {
+    let text: String
+    let modelID: String
+}
+
+protocol OpenRouterConversationResponding: Sendable {
+    func respond(
+        to request: OpenRouterConversationRequest
+    ) async throws -> OpenRouterConversationResponse?
+}
+
+struct DisabledOpenRouterConversationResponder: OpenRouterConversationResponding {
+    func respond(
+        to request: OpenRouterConversationRequest
+    ) async throws -> OpenRouterConversationResponse? {
+        nil
     }
 }
 
@@ -63,6 +101,19 @@ struct AgentHandoffCompressionRequest: Hashable, Sendable {
     let previousAgent: AgentKind
     let nextAgent: AgentKind
     let context: String
+    let interactionMode: AgentInteractionMode
+
+    init(
+        previousAgent: AgentKind,
+        nextAgent: AgentKind,
+        context: String,
+        interactionMode: AgentInteractionMode = .workspace
+    ) {
+        self.previousAgent = previousAgent
+        self.nextAgent = nextAgent
+        self.context = context
+        self.interactionMode = interactionMode
+    }
 }
 
 struct CompressedAgentHandoff: Hashable, Sendable {
@@ -95,8 +146,18 @@ enum OpenRouterHandoffPromptBuilder {
         from previousAgent: AgentKind,
         to nextAgent: AgentKind,
         gitSnapshot: GitSnapshot,
-        lastAgentOutput: String?
+        lastAgentOutput: String?,
+        interactionMode: AgentInteractionMode? = nil
     ) -> AgentHandoffCompressionRequest {
+        if (interactionMode ?? task.effectiveInteractionMode) == .conversation {
+            return conversationRequest(
+                task: task,
+                from: previousAgent,
+                to: nextAgent,
+                lastAgentOutput: lastAgentOutput
+            )
+        }
+
         let specification = task.effectiveSpecification
         let persona = task.effectivePersona
         let recentMessages = task.chatMessages.suffix(10).map { message in
@@ -200,7 +261,56 @@ enum OpenRouterHandoffPromptBuilder {
         return AgentHandoffCompressionRequest(
             previousAgent: previousAgent,
             nextAgent: nextAgent,
-            context: limited(context, to: maximumContextCharacters)
+            context: limited(context, to: maximumContextCharacters),
+            interactionMode: .workspace
+        )
+    }
+
+    private static func conversationRequest(
+        task: CodingTask,
+        from previousAgent: AgentKind,
+        to nextAgent: AgentKind,
+        lastAgentOutput: String?
+    ) -> AgentHandoffCompressionRequest {
+        let persona = task.effectivePersona
+        let recentMessages = task.chatMessages
+            .filter { $0.role != .system }
+            .suffix(18)
+            .map { message in
+                let speaker = message.role == .agent ? task.title : "Пользователь"
+                let attachmentNames = message.fileAttachments.map(\.fileName)
+                let attachments = attachmentNames.isEmpty
+                    ? ""
+                    : " [attachments: \(attachmentNames.joined(separator: ", "))]"
+                return "- \(speaker): \(limited(message.text, to: 1_600))\(attachments)"
+            }
+        let output = lastAgentOutput?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        let context = """
+        A confirmed account quota error interrupted \(previousAgent.displayName) during a personal conversation. Prepare a compact, factual conversational handoff for \(nextAgent.displayName). Preserve the user's preferences, emotional context, open topics, and the agent's personality. Do not turn the dialogue into a software task and do not mention repositories, Git, files, checks, or coding unless the user explicitly discussed them.
+
+        <agent name="\(task.title)">
+        Personality:
+        \(limited(persona.prompt, to: 3_000))
+        </agent>
+
+        <recent_conversation>
+        \(recentMessages.isEmpty ? "- No earlier messages." : recentMessages.joined(separator: "\n"))
+        </recent_conversation>
+
+        <interrupted_reply>
+        \(output.map { limitedTail($0, to: 4_000) } ?? "- No usable partial reply was captured.")
+        </interrupted_reply>
+
+        Map stable facts or preferences to decisions, recent conversational context to progress, open topics or sensitivities to knownIssues, and the most natural next reply to nextStep.
+        """
+
+        return AgentHandoffCompressionRequest(
+            previousAgent: previousAgent,
+            nextAgent: nextAgent,
+            context: limited(context, to: maximumContextCharacters),
+            interactionMode: .conversation
         )
     }
 

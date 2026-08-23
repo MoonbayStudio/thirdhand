@@ -14,6 +14,7 @@ struct AgentProfileInspectorView: View {
     @State private var savedDraft: AgentProfileDraft
     @State private var importTarget: ImportTarget = .repository
     @State private var isChoosingFile = false
+    @State private var isShowingAPIModelPicker = false
     @State private var showsSavedConfirmation = false
 
     init(task: CodingTask) {
@@ -38,6 +39,9 @@ struct AgentProfileInspectorView: View {
         !draft.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             && !draft.personalityPrompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             && !draft.repositoryPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && !(draft.routingMode == .manual
+                && draft.executionSource == .api
+                && draft.apiModelID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             && !isBusy
     }
 
@@ -67,6 +71,8 @@ struct AgentProfileInspectorView: View {
                 Divider()
                 personalitySection
                 Divider()
+                interactionSection
+                Divider()
                 modelSection
                 Divider()
                 workspaceSection
@@ -89,10 +95,19 @@ struct AgentProfileInspectorView: View {
             }
         }
         .onChange(of: draft.agentKind) { oldValue, newValue in
-            guard oldValue != newValue else { return }
+            guard oldValue != newValue, draft.executionSource == .cli else { return }
             draft.configuration = TaskAgentConfiguration(
                 values: [AgentOptionID.model.rawValue: capabilities.defaultModelID]
             )
+        }
+        .onChange(of: draft.executionSource) { _, source in
+            if source == .api, draft.apiModelID.isEmpty {
+                draft.apiModelID = AIAPIPreferences.primaryModelID(for: draft.apiProvider)
+            }
+        }
+        .onChange(of: draft.apiProvider) { oldValue, newValue in
+            guard oldValue != newValue else { return }
+            draft.apiModelID = AIAPIPreferences.primaryModelID(for: newValue)
         }
         .fileImporter(
             isPresented: $isChoosingFile,
@@ -100,6 +115,13 @@ struct AgentProfileInspectorView: View {
             allowsMultipleSelection: false
         ) { result in
             handleFileSelection(result)
+        }
+        .sheet(isPresented: $isShowingAPIModelPicker) {
+            APIModelPicker(
+                title: "Модель \(draft.apiProvider.displayName)",
+                models: AIAPIPreferences.cachedModels(for: draft.apiProvider),
+                selectedModelID: $draft.apiModelID
+            )
         }
     }
 
@@ -113,9 +135,16 @@ struct AgentProfileInspectorView: View {
             )
 
             VStack(alignment: .leading, spacing: 3) {
-                Text(draft.name.isEmpty ? "Новый агент" : draft.name)
-                    .font(.title3.weight(.semibold))
-                    .lineLimit(1)
+                Group {
+                    if draft.name.isEmpty {
+                        Text("Новый агент")
+                    } else {
+                        Text(draft.name)
+                    }
+                }
+                .font(.title3.weight(.semibold))
+                .lineLimit(1)
+
                 Text(runtimeSummary)
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -159,11 +188,11 @@ struct AgentProfileInspectorView: View {
     private var onboardingBannerText: String {
         switch task.onboardingStage {
         case .introducing:
-            "Агент начинает знакомство в чате. Профиль уже можно заполнить вручную."
+            AppLocalization.string("Агент начинает знакомство в чате. Профиль уже можно заполнить вручную.")
         case .awaitingIdentity:
-            "Опишите агента в чате — ИИ заполнит этот профиль. Либо настройте всё вручную и сохраните."
+            AppLocalization.string("Опишите агента в чате — ИИ заполнит этот профиль. Либо настройте всё вручную и сохраните.")
         case .configuring:
-            "ИИ собирает имя, характер и параметры модели из вашего ответа. Его служебный ответ останется внутри приложения."
+            AppLocalization.string("ИИ собирает имя, характер и параметры модели из вашего ответа. Его служебный ответ останется внутри приложения.")
         case nil:
             ""
         }
@@ -210,6 +239,26 @@ struct AgentProfileInspectorView: View {
         }
     }
 
+    private var interactionSection: some View {
+        VStack(alignment: .leading, spacing: 9) {
+            sectionTitle("Сценарий")
+
+            Picker("Сценарий", selection: $draft.interactionMode) {
+                Text("Авто").tag(AgentInteractionMode.automatic)
+                Text("Общение").tag(AgentInteractionMode.conversation)
+                Text("Проект").tag(AgentInteractionMode.workspace)
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .accessibilityIdentifier("agent-interaction-mode-picker")
+
+            Text(draft.interactionMode.detail)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
     private var modelSection: some View {
         VStack(alignment: .leading, spacing: 11) {
             sectionTitle("ИИ и лимиты")
@@ -225,7 +274,7 @@ struct AgentProfileInspectorView: View {
                     Label("Авто-выбор при исчерпании лимита", systemImage: "arrow.triangle.2.circlepath")
                         .font(.callout.weight(.medium))
 
-                    Text("Агент начнёт с первого доступного провайдера и переключится дальше только после подтверждённой ошибки лимита.")
+                    Text("Агент начнёт с первого доступного CLI и при подтверждённом лимите продолжит через следующий CLI или подключённый API.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -239,27 +288,73 @@ struct AgentProfileInspectorView: View {
                             }
                             Image(systemName: kind.systemImage)
                                 .foregroundStyle(kind.tint)
-                                .help(kind.displayName)
+                                .help("\(kind.displayName) · CLI")
+                        }
+
+                        ForEach(store.availableAPITargets) { target in
+                            Image(systemName: "chevron.right")
+                                .font(.caption2)
+                                .foregroundStyle(.tertiary)
+                            Image(systemName: target.provider.systemImage)
+                                .foregroundStyle(target.provider.tint)
+                                .help(target.displayName)
                         }
                     }
                 }
                 .padding(11)
                 .background(.quaternary.opacity(0.55), in: RoundedRectangle(cornerRadius: 11, style: .continuous))
             } else {
-                Picker("Провайдер", selection: $draft.agentKind) {
-                    ForEach(store.agentInstallations) { installation in
-                        Text(
-                            installation.isAvailable
-                                ? installation.kind.displayName
-                                : "\(installation.kind.displayName) — CLI не найден"
-                        )
-                        .tag(installation.kind)
-                    }
+                Picker("Способ запуска", selection: $draft.executionSource) {
+                    Text("CLI").tag(AgentExecutionSource.cli)
+                    Text("API").tag(AgentExecutionSource.api)
                 }
+                .pickerStyle(.segmented)
 
-                Picker("Модель", selection: modelBinding) {
-                    ForEach(capabilities.models) { model in
-                        Text(model.title).tag(model.id)
+                if draft.executionSource == .cli {
+                    Picker("CLI", selection: $draft.agentKind) {
+                        ForEach(store.agentInstallations) { installation in
+                            Text(
+                                installation.isAvailable
+                                    ? installation.kind.displayName
+                                    : AppLocalization.string("\(installation.kind.displayName) — CLI не найден")
+                            )
+                            .tag(installation.kind)
+                        }
+                    }
+
+                    Picker("Модель", selection: modelBinding) {
+                        ForEach(capabilities.models) { model in
+                            Text(model.title).tag(model.id)
+                        }
+                    }
+                } else {
+                    Picker("API", selection: $draft.apiProvider) {
+                        ForEach(AIAPIProvider.allCases) { provider in
+                            Text(provider.displayName).tag(provider)
+                        }
+                    }
+
+                    LabeledContent("Модель") {
+                        HStack(spacing: 7) {
+                            TextField("ID модели", text: $draft.apiModelID)
+                                .textFieldStyle(.roundedBorder)
+
+                            Button("Выбрать…") {
+                                isShowingAPIModelPicker = true
+                            }
+                            .disabled(
+                                AIAPIPreferences.cachedModels(for: draft.apiProvider).isEmpty
+                            )
+                        }
+                    }
+
+                    if draft.apiModelID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        Label(
+                            "Сначала подключите API и выберите модель в настройках.",
+                            systemImage: "exclamationmark.triangle"
+                        )
+                        .font(.caption)
+                        .foregroundStyle(.orange)
                     }
                 }
             }
@@ -270,16 +365,23 @@ struct AgentProfileInspectorView: View {
         VStack(alignment: .leading, spacing: 9) {
             sectionTitle("Рабочая папка")
 
-            Text(draft.repositoryPath)
-                .font(.caption.monospaced())
-                .foregroundStyle(.secondary)
-                .lineLimit(3)
-                .truncationMode(.middle)
-                .textSelection(.enabled)
+            if draft.interactionMode == .conversation {
+                Text("В режиме общения агент запускается в изолированной папке и не получает Git-контекст проекта.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else {
+                Text(draft.repositoryPath)
+                    .font(.caption.monospaced())
+                    .foregroundStyle(.secondary)
+                    .lineLimit(3)
+                    .truncationMode(.middle)
+                    .textSelection(.enabled)
 
-            Button("Выбрать папку…") {
-                importTarget = .repository
-                isChoosingFile = true
+                Button("Выбрать папку…") {
+                    importTarget = .repository
+                    isChoosingFile = true
+                }
             }
         }
     }
@@ -293,7 +395,11 @@ struct AgentProfileInspectorView: View {
                     if showsSavedConfirmation {
                         Image(systemName: "checkmark")
                     }
-                    Text(showsSavedConfirmation ? "Сохранено" : "Сохранить изменения")
+                    Text(
+                        showsSavedConfirmation
+                            ? AppLocalization.string("Сохранено")
+                            : AppLocalization.string("Сохранить изменения")
+                    )
                 }
                 .frame(maxWidth: .infinity)
             }
@@ -337,14 +443,23 @@ struct AgentProfileInspectorView: View {
 
     private var runtimeSummary: String {
         if draft.routingMode == .automatic {
-            return "Авто · смена при лимите"
+            return AppLocalization.string("\(draft.interactionMode.title) · Auto: CLI → API")
+        }
+        if draft.executionSource == .api {
+            let model = draft.apiModelID.isEmpty ? nil : draft.apiModelID
+            return [draft.interactionMode.title, draft.apiProvider.shortName, model]
+                .compactMap { $0 }
+                .joined(separator: " · ")
         }
         let model = capabilities.model(for: draft.configuration[.model])?.compactTitle
-        return [draft.agentKind.shortName, model].compactMap { $0 }.joined(separator: " · ")
+        return [draft.interactionMode.title, draft.agentKind.shortName, model]
+            .compactMap { $0 }
+            .joined(separator: " · ")
     }
 
-    private func sectionTitle(_ text: String) -> some View {
-        Text(text.uppercased())
+    private func sectionTitle(_ text: LocalizedStringKey) -> some View {
+        Text(text)
+            .textCase(.uppercase)
             .font(.caption.weight(.semibold))
             .foregroundStyle(.tertiary)
     }
@@ -367,8 +482,8 @@ struct AgentProfileInspectorView: View {
             }
         } catch {
             store.lastError = importTarget == .avatar
-                ? "Не удалось загрузить фото: \(error.localizedDescription)"
-                : "Не удалось выбрать папку: \(error.localizedDescription)"
+                ? AppLocalization.string("Не удалось загрузить фото: \(error.localizedDescription)")
+                : AppLocalization.string("Не удалось выбрать папку: \(error.localizedDescription)")
         }
     }
 

@@ -3,40 +3,48 @@ import SwiftUI
 struct InspectorToggleButton: View {
     @Environment(AppStore.self) private var store
 
+    private var panelTitle: String {
+        store.selectedGroupChat == nil ? "настройки агента" : "участников группы"
+    }
+
     var body: some View {
         Button {
             store.isShowingInspector.toggle()
         } label: {
             Label(
                 store.isShowingInspector
-                    ? "Скрыть настройки агента"
-                    : "Показать настройки агента",
+                    ? "Скрыть \(panelTitle)"
+                    : "Показать \(panelTitle)",
                 systemImage: "sidebar.trailing"
             )
         }
         .help(
             store.isShowingInspector
-                ? "Скрыть правую панель"
-                : "Показать правую панель"
+                ? AppLocalization.string("Скрыть правую панель")
+                : AppLocalization.string("Показать правую панель")
         )
         .accessibilityIdentifier("toggle-agent-inspector-button")
     }
 }
 
 struct DetailCanvasBackground: View {
+    @Environment(\.appAccessibilityOptions) private var accessibilityOptions
+
     var body: some View {
         ZStack {
             Color(nsColor: .textBackgroundColor)
 
-            LinearGradient(
-                colors: [
-                    Color.accentColor.opacity(0.085),
-                    Color.purple.opacity(0.035),
-                    Color.clear
-                ],
-                startPoint: .topLeading,
-                endPoint: .bottomTrailing
-            )
+            if !accessibilityOptions.reduceTransparency {
+                LinearGradient(
+                    colors: [
+                        Color.accentColor.opacity(0.085),
+                        Color.purple.opacity(0.035),
+                        Color.clear
+                    ],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                )
+            }
         }
         .ignoresSafeArea()
     }
@@ -90,7 +98,7 @@ struct AgentRunCapsule: View {
 
     var body: some View {
         HStack(spacing: 7) {
-            ActivityPulse(tint: run.agent.tint, compact: true)
+            ActivityPulse(tint: run.executionTarget.tint, compact: true)
 
             VStack(alignment: .leading, spacing: 1) {
                 Text(activity.current.title)
@@ -103,10 +111,10 @@ struct AgentRunCapsule: View {
         .padding(.leading, 5)
         .padding(.trailing, 10)
         .padding(.vertical, 4)
-        .background(run.agent.tint.opacity(0.1), in: Capsule())
+        .background(run.executionTarget.tint.opacity(0.1), in: Capsule())
         .overlay {
             Capsule()
-                .strokeBorder(run.agent.tint.opacity(0.2), lineWidth: 0.5)
+                .strokeBorder(run.executionTarget.tint.opacity(0.2), lineWidth: 0.5)
         }
     }
 }
@@ -207,6 +215,42 @@ extension AgentKind {
         case .codex: "terminal.fill"
         case .claudeCode: "sparkles"
         case .antigravity: "arrow.up.and.down.and.arrow.left.and.right"
+        }
+    }
+}
+
+extension AIAPIProvider {
+    var tint: Color {
+        switch self {
+        case .openRouter: .indigo
+        case .openAI: .green
+        case .anthropic: .orange
+        case .googleGemini: .blue
+        }
+    }
+
+    var systemImage: String {
+        switch self {
+        case .openRouter: "point.3.connected.trianglepath.dotted"
+        case .openAI: "sparkles"
+        case .anthropic: "text.bubble.fill"
+        case .googleGemini: "diamond.fill"
+        }
+    }
+}
+
+extension AgentExecutionTarget {
+    var tint: Color {
+        switch self {
+        case let .cli(agent): agent.tint
+        case let .api(target): target.provider.tint
+        }
+    }
+
+    var systemImage: String {
+        switch self {
+        case let .cli(agent): agent.systemImage
+        case let .api(target): target.provider.systemImage
         }
     }
 }

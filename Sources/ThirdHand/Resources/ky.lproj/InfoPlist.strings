@@ -1,0 +1,3 @@
+"CFBundleDisplayName" = "Third Hand";
+"NSMicrophoneUsageDescription" = "Third Hand микрофонду билдирүүнү үн менен киргизүү учурунда гана колдонот.";
+"NSSpeechRecognitionUsageDescription" = "Third Hand диктанттык билдирүүнү түзөтүлүүчү текстке айлантат.";

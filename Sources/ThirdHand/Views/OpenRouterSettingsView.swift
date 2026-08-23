@@ -5,6 +5,8 @@ struct OpenRouterSettingsView: View {
     private var isHandoffEnabled = false
     @AppStorage(OpenRouterPreferences.handoffModelIDKey)
     private var modelID = ""
+    @AppStorage(OpenRouterPreferences.casualConversationEnabledKey)
+    private var isCasualConversationEnabled = true
 
     @State private var apiKeyDraft = ""
     @State private var hasStoredKey = false
@@ -20,7 +22,27 @@ struct OpenRouterSettingsView: View {
 
     var body: some View {
         Form {
-            Section("Бесшовное переключение") {
+            Section("Быстрые разговоры") {
+                Toggle(
+                    "Отвечать через бесплатные модели OpenRouter",
+                    isOn: $isCasualConversationEnabled
+                )
+
+                Text("В режиме «Авто» Third Hand сначала учитывает промпт личности, текущую реплику и недавний контекст. Если это обычное общение без работы с проектом, запрос уходит в openrouter/free. Проектные команды остаются у Codex, Claude и Antigravity.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                if isCasualConversationEnabled && !hasStoredKey {
+                    Label(
+                        "Для быстрых ответов сохраните API-ключ OpenRouter ниже.",
+                        systemImage: "exclamationmark.triangle"
+                    )
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                }
+            }
+
+            Section("Бесшовное переключение CLI") {
                 Toggle(
                     "Сжимать контекст через OpenRouter перед Auto failover",
                     isOn: $isHandoffEnabled
@@ -126,7 +148,15 @@ struct OpenRouterSettingsView: View {
             }
 
             Section("Какие данные уходят") {
-                Text("При переключении OpenRouter получает промпт личности, спецификацию, semantic handoff, последние 10 сообщений, ограниченный хвост вывода CLI и Git-сводку. Полный diff и вложения отдельно не отправляются; вывод CLI может содержать фрагменты, которые успел показать агент.")
+                Text("Для быстрого разговора OpenRouter получает промпт личности, текущую реплику и недавнюю историю чата. Рабочая папка, Git-контекст и файлы не отправляются; сообщения с новыми вложениями остаются на CLI-маршруте.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                Text("При переключении CLI OpenRouter получает промпт личности, спецификацию, semantic handoff, последние 10 сообщений, ограниченный хвост вывода CLI и Git-сводку. Полный diff и вложения отдельно не отправляются; вывод CLI может содержать фрагменты, которые успел показать агент.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                Text("openrouter/free может выбирать разных бесплатных провайдеров; для них действуют собственные правила хранения данных и более низкие лимиты доступности.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
 
@@ -199,7 +229,7 @@ struct OpenRouterSettingsView: View {
             hasStoredKey = false
             availableModels = []
             isHandoffEnabled = false
-            statusMessage = "Ключ удалён из Keychain; удалённый handoff выключен."
+            statusMessage = "Ключ удалён из Keychain; быстрые ответы и удалённый handoff не будут использовать OpenRouter."
             statusIsError = false
         } catch {
             showError(error)

@@ -305,6 +305,38 @@ final class AgentExecutionTests: XCTestCase {
         XCTAssertTrue(prompt.contains("Проверь ресайз"))
     }
 
+    func testConversationEnvelopeKeepsPersonaAndChatWithoutProjectContract() {
+        let task = CodingTask(
+            title: "Стеша",
+            originalRequest: "",
+            repositoryPath: "/tmp/REPOSITORY_MUST_NOT_APPEAR",
+            messages: [
+                TaskMessage(role: .user, text: "Я сегодня немного устал"),
+                TaskMessage(role: .agent, text: "Давай выдохнем и поговорим"),
+                TaskMessage(role: .user, text: "Привет")
+            ],
+            persona: AgentPersona(
+                prompt: "Ты — Стеша, добрая виртуальная подруга для душевных разговоров.",
+                interactionMode: .conversation
+            )
+        )
+
+        let prompt = ConversationEnvelopeBuilder.build(
+            task: task,
+            currentInstruction: "Привет",
+            attachments: []
+        )
+
+        XCTAssertTrue(prompt.contains("добрая виртуальная подруга"))
+        XCTAssertTrue(prompt.contains("Я сегодня немного устал"))
+        XCTAssertTrue(prompt.contains("Давай выдохнем и поговорим"))
+        XCTAssertTrue(prompt.contains("<current_user_message>\nПривет"))
+        XCTAssertFalse(prompt.contains("/tmp/REPOSITORY_MUST_NOT_APPEAR"))
+        XCTAssertFalse(prompt.contains("<task_specification"))
+        XCTAssertFalse(prompt.contains("<<<THIRD_HAND_STATUS>>>"))
+        XCTAssertFalse(prompt.contains("Inspect the repository and current git diff"))
+    }
+
     func testEnvelopeLabelsValidationFreshnessAgainstCurrentGitFingerprint() throws {
         let snapshot = GitSnapshot(
             branch: "main",

@@ -123,9 +123,22 @@ struct ChatMessageRow: View {
                 .textSelection(.enabled)
                 .fixedSize(horizontal: false, vertical: true)
 
-            Text(message.createdAt, format: .dateTime.hour().minute())
-                .font(.caption2)
-                .foregroundStyle(.secondary)
+            HStack(spacing: 6) {
+                Text(message.createdAt, format: .dateTime.hour().minute())
+
+                if let source = message.executionSource,
+                   let targetName = message.executionTargetName {
+                    Text("·")
+                    Label(
+                        "\(source.title) · \(targetName)",
+                        systemImage: source == .cli ? "terminal" : "key.horizontal"
+                    )
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                }
+            }
+            .font(.caption2)
+            .foregroundStyle(.secondary)
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 10)
@@ -134,6 +147,8 @@ struct ChatMessageRow: View {
 }
 
 struct AgentTypingRow: View {
+    @Environment(\.appAccessibilityOptions) private var accessibilityOptions
+
     let persona: AgentPersona
     let agentName: String
 
@@ -153,12 +168,14 @@ struct AgentTypingRow: View {
                     Circle()
                         .fill(Color.secondary)
                         .frame(width: 6, height: 6)
-                        .scaleEffect(isAnimating ? 1 : 0.58)
-                        .opacity(isAnimating ? 0.95 : 0.35)
+                        .scaleEffect(accessibilityOptions.reduceMotion ? 1 : (isAnimating ? 1 : 0.58))
+                        .opacity(accessibilityOptions.reduceMotion ? 0.7 : (isAnimating ? 0.95 : 0.35))
                         .animation(
-                            .easeInOut(duration: 0.52)
-                                .repeatForever(autoreverses: true)
-                                .delay(Double(index) * 0.14),
+                            accessibilityOptions.reduceMotion
+                                ? nil
+                                : .easeInOut(duration: 0.52)
+                                    .repeatForever(autoreverses: true)
+                                    .delay(Double(index) * 0.14),
                             value: isAnimating
                         )
                 }
@@ -178,7 +195,7 @@ struct AgentTypingRow: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .onAppear {
-            isAnimating = true
+            isAnimating = !accessibilityOptions.reduceMotion
         }
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("\(agentName) печатает")
@@ -209,7 +226,7 @@ struct AgentWorkingRow: View {
 
                 ProgressView()
                     .controlSize(.mini)
-                    .tint(run.agent.tint)
+                    .tint(run.executionTarget.tint)
                     .padding(3)
                     .background(.regularMaterial, in: Circle())
             }
@@ -227,7 +244,7 @@ struct AgentWorkingRow: View {
                     Spacer()
 
                     VStack(alignment: .trailing, spacing: 2) {
-                        Text(run.agent.displayName)
+                        Text(run.executionTarget.displayName)
                             .font(.caption.weight(.medium))
                         AgentRunElapsedText(startedAt: run.startedAt)
                             .font(.caption2)
@@ -241,11 +258,11 @@ struct AgentWorkingRow: View {
                             let isCurrent = index == activity.recent.count - 1
                             Label(stage.title, systemImage: stage.systemImage)
                                 .font(.caption2.weight(isCurrent ? .semibold : .regular))
-                                .foregroundStyle(isCurrent ? run.agent.tint : Color.secondary)
+                                .foregroundStyle(isCurrent ? run.executionTarget.tint : Color.secondary)
                                 .padding(.horizontal, 8)
                                 .padding(.vertical, 5)
                                 .background(
-                                    isCurrent ? run.agent.tint.opacity(0.1) : Color.secondary.opacity(0.07),
+                                    isCurrent ? run.executionTarget.tint.opacity(0.1) : Color.secondary.opacity(0.07),
                                     in: Capsule()
                                 )
                         }
@@ -256,7 +273,7 @@ struct AgentWorkingRow: View {
                    !liveOutput.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     HStack(spacing: 6) {
                         Circle()
-                            .fill(run.agent.tint)
+                            .fill(run.executionTarget.tint)
                             .frame(width: 5, height: 5)
                         Text("Последнее событие")
                         Text(liveOutput.updatedAt, format: .dateTime.hour().minute().second())
@@ -296,7 +313,7 @@ struct AgentWorkingRow: View {
         .background(
             LinearGradient(
                 colors: [
-                    run.agent.tint.opacity(0.11),
+                    run.executionTarget.tint.opacity(0.11),
                     Color(nsColor: .controlBackgroundColor).opacity(0.72)
                 ],
                 startPoint: .topLeading,
@@ -306,7 +323,7 @@ struct AgentWorkingRow: View {
         )
         .overlay {
             RoundedRectangle(cornerRadius: 17, style: .continuous)
-                .strokeBorder(run.agent.tint.opacity(0.18), lineWidth: 0.5)
+                .strokeBorder(run.executionTarget.tint.opacity(0.18), lineWidth: 0.5)
         }
         .shadow(color: .black.opacity(0.045), radius: 10, y: 4)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -332,9 +349,9 @@ struct AgentActivityAccessory: View {
 
     var body: some View {
         HStack(spacing: 8) {
-            ActivityPulse(tint: run.agent.tint, compact: true)
+            ActivityPulse(tint: run.executionTarget.tint, compact: true)
 
-            Text(run.agent.shortName)
+            Text(run.executionTarget.shortName)
                 .fontWeight(.semibold)
 
             Text("·")
@@ -352,10 +369,10 @@ struct AgentActivityAccessory: View {
         .font(.caption)
         .padding(.horizontal, 10)
         .padding(.vertical, 6)
-        .background(run.agent.tint.opacity(0.075), in: Capsule())
+        .background(run.executionTarget.tint.opacity(0.075), in: Capsule())
         .overlay {
             Capsule()
-                .strokeBorder(run.agent.tint.opacity(0.14), lineWidth: 0.5)
+                .strokeBorder(run.executionTarget.tint.opacity(0.14), lineWidth: 0.5)
         }
         .accessibilityElement(children: .combine)
     }

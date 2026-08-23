@@ -4,6 +4,7 @@ struct GeneratedAgentProfile: Hashable, Sendable {
     let name: String
     let personalityPrompt: String
     let avatarColor: AgentAvatarColor
+    let interactionMode: AgentInteractionMode
     let routingMode: AgentRoutingMode
     let agentKind: AgentKind?
     let modelID: String?
@@ -20,13 +21,14 @@ enum AgentProfileGenerationPromptBuilder {
         Это служебный запрос: не отвечай пользователю, не приветствуй его, не объясняй ход мыслей, не изучай и не изменяй файлы. Ответ получит приложение, а не чат. Верни только один JSON-объект внутри указанных маркеров.
 
         <<<THIRD_HAND_AGENT_PROFILE>>>
-        {"name":"Короткое имя","personalityPrompt":"Полные инструкции личности на языке пользователя","avatarColor":"indigo","routingMode":"automatic","agentKind":null,"modelID":null}
+        {"name":"Короткое имя","personalityPrompt":"Полные инструкции личности на языке пользователя","avatarColor":"indigo","interactionMode":"automatic","routingMode":"automatic","agentKind":null,"modelID":null}
         <<<END_THIRD_HAND_AGENT_PROFILE>>>
 
         Правила:
         - name: имя длиной 1–40 символов; если пользователь его назвал, сохрани это имя.
         - personalityPrompt: самостоятельный системный промпт. Сохрани роль, характер, стиль общения, профессиональные привычки и ограничения из описания. Пиши во втором лице: «Ты — ...».
         - avatarColor: только indigo, blue, teal, green, orange или pink.
+        - interactionMode: automatic для смешанного сценария, где с личностью можно и просто поговорить, и дать ей работу по проекту; conversation только если ей никогда не нужны Git и рабочая папка; workspace только если она всегда выполняет проектные задачи.
         - routingMode: automatic, если пользователь явно не закрепил конкретного провайдера или модель; иначе manual.
         - agentKind: только codex, claudeCode, antigravity либо null. Не выдумывай недоступный провайдер.
         - modelID: точный ID из списка ниже либо null. Не выдумывай ID.
@@ -47,6 +49,7 @@ enum AgentProfileGenerationResponseParser {
         let name: String
         let personalityPrompt: String
         let avatarColor: String?
+        let interactionMode: String?
         let routingMode: String?
         let agentKind: String?
         let modelID: String?
@@ -71,6 +74,9 @@ enum AgentProfileGenerationResponseParser {
             name: String(name.prefix(40)),
             personalityPrompt: String(prompt.prefix(12_000)),
             avatarColor: payload.avatarColor.flatMap(AgentAvatarColor.init(rawValue:)) ?? .indigo,
+            interactionMode: payload.interactionMode
+                .flatMap(AgentInteractionMode.init(rawValue:))
+                ?? .automatic,
             routingMode: payload.routingMode.flatMap(AgentRoutingMode.init(rawValue:)) ?? .automatic,
             agentKind: payload.agentKind.flatMap(AgentKind.init(rawValue:)),
             modelID: normalizedOptional(payload.modelID)
@@ -83,6 +89,7 @@ enum AgentProfileGenerationResponseParser {
             name: seed.name,
             personalityPrompt: seed.prompt,
             avatarColor: seed.avatarColor,
+            interactionMode: .automatic,
             routingMode: .automatic,
             agentKind: nil,
             modelID: nil

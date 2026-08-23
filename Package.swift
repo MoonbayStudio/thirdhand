@@ -4,6 +4,7 @@ import PackageDescription
 
 let package = Package(
     name: "ThirdHand",
+    defaultLocalization: "ru",
     platforms: [
         .macOS(.v14)
     ],
@@ -13,7 +14,10 @@ let package = Package(
     targets: [
         .executableTarget(
             name: "ThirdHand",
-            path: "Sources/ThirdHand"
+            path: "Sources/ThirdHand",
+            resources: [
+                .process("Resources")
+            ]
         ),
         .testTarget(
             name: "ThirdHandTests",

@@ -5,7 +5,7 @@ import XCTest
 
 @MainActor
 final class AppStoreWorkflowTests: XCTestCase {
-    func testOpenRouterCompressionIsPersistedBeforeNextAutomaticAgentStarts() async throws {
+    func testAPICompressionIsPersistedBeforeNextAutomaticAgentStarts() async throws {
         let fixture = try makeFixture()
         defer { try? FileManager.default.removeItem(at: fixture.root) }
         let quotaCLI = try makeExecutable(
@@ -61,7 +61,7 @@ final class AppStoreWorkflowTests: XCTestCase {
         XCTAssertEqual(updated.handoff.nextStep, "Run resize QA before changing architecture")
         XCTAssertTrue(updated.handoff.knownIssues.contains("Minimum-width QA remains"))
         XCTAssertTrue(updated.handoff.knownIssues.contains { $0.contains("Codex") })
-        XCTAssertTrue(updated.chatMessages.contains { $0.text.contains("OpenRouter (provider/handoff-model)") })
+        XCTAssertTrue(updated.chatMessages.contains { $0.text.contains("API-модель provider/handoff-model") })
         XCTAssertTrue(updated.chatMessages.contains { $0.text.contains("REMOTE_HANDOFF_OK") })
 
         let requests = await compressor.recordedRequests()
@@ -78,7 +78,7 @@ final class AppStoreWorkflowTests: XCTestCase {
         XCTAssertTrue(capturedPrompt.contains("Run resize QA before changing architecture"))
     }
 
-    func testOpenRouterFailureFallsBackWithoutBlockingAutomaticAgent() async throws {
+    func testAPIFailureFallsBackWithoutBlockingAutomaticAgent() async throws {
         let fixture = try makeFixture()
         defer { try? FileManager.default.removeItem(at: fixture.root) }
         let quotaCLI = try makeExecutable(
@@ -117,11 +117,11 @@ final class AppStoreWorkflowTests: XCTestCase {
         let updated = try XCTUnwrap(store.tasks.first)
         XCTAssertEqual(updated.currentAgent, .claudeCode)
         XCTAssertEqual(updated.status, .ready)
-        XCTAssertTrue(updated.chatMessages.contains { $0.text.contains("OpenRouter недоступен") })
+        XCTAssertTrue(updated.chatMessages.contains { $0.text.contains("API-handoff недоступен") })
         XCTAssertTrue(updated.chatMessages.contains { $0.text.contains("LOCAL_FALLBACK_OK") })
     }
 
-    func testStopCancelsInFlightOpenRouterCompressionBeforeNextAgentStarts() async throws {
+    func testStopCancelsInFlightAPICompressionBeforeNextAgentStarts() async throws {
         let fixture = try makeFixture()
         defer { try? FileManager.default.removeItem(at: fixture.root) }
         let quotaCLI = try makeExecutable(
@@ -593,6 +593,190 @@ final class AppStoreWorkflowTests: XCTestCase {
         XCTAssertTrue(store.activeRuns.isEmpty)
     }
 
+    func testCasualMessageUsesOpenRouterFreeBeforeLookingForCLI() async throws {
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let responder = RecordingConversationResponder(
+            response: OpenRouterConversationResponse(
+                text: "Привет! Я рядом.",
+                modelID: "provider/friendly-model:free"
+            )
+        )
+        let task = CodingTask(
+            title: "Стеша",
+            originalRequest: "",
+            repositoryPath: fixture.repository.path,
+            routingMode: .automatic,
+            messages: [
+                TaskMessage(role: .user, text: "Мне сегодня немного грустно"),
+                TaskMessage(role: .agent, text: "Я рядом, хочешь поговорить?")
+            ],
+            persona: AgentPersona(
+                prompt: "Ты — Стеша, виртуальная подруга для душевных разговоров.",
+                interactionMode: .automatic
+            )
+        )
+        let store = AppStore(
+            persistence: PersistenceService(stateURL: fixture.stateURL),
+            performAgentDiscovery: false,
+            preferredAgentOrder: { [.codex, .claudeCode, .antigravity] },
+            conversationResponder: responder
+        )
+        store.tasks = [task]
+        store.selection = task.id
+        store.agentInstallations = AgentKind.allCases.map {
+            AgentInstallation(kind: $0, executablePath: nil)
+        }
+
+        await store.submitMessage(taskID: task.id, text: "Привет", attachments: [])
+
+        let updated = try XCTUnwrap(store.tasks.first)
+        XCTAssertEqual(updated.status, .ready)
+        XCTAssertEqual(updated.chatMessages.last?.text, "Привет! Я рядом.")
+        XCTAssertTrue(
+            updated.activity.contains {
+                $0.detail.contains("provider/friendly-model:free")
+            }
+        )
+        XCTAssertTrue(store.activeRuns.isEmpty)
+
+        let requests = await responder.recordedRequests()
+        XCTAssertEqual(requests.count, 1)
+        let prompt = try XCTUnwrap(requests.first?.prompt)
+        XCTAssertTrue(prompt.contains("виртуальная подруга"))
+        XCTAssertTrue(prompt.contains("Мне сегодня немного грустно"))
+        XCTAssertTrue(prompt.contains("Привет"))
+        XCTAssertFalse(prompt.contains(fixture.repository.path))
+        XCTAssertFalse(prompt.contains("<task_specification"))
+    }
+
+    func testProjectMessageDoesNotUseOpenRouterConversationRoute() async throws {
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let projectCLI = try makeExecutable(
+            named: "project-only-cli",
+            contents: "#!/bin/sh\nprintf '{\"type\":\"result\",\"result\":\"PROJECT_OK\"}\\n'\n",
+            in: fixture.root
+        )
+        let responder = RecordingConversationResponder(
+            response: OpenRouterConversationResponse(
+                text: "MUST_NOT_BE_USED",
+                modelID: "provider/free:free"
+            )
+        )
+        let task = CodingTask(
+            title: "Муни",
+            originalRequest: "",
+            repositoryPath: fixture.repository.path,
+            currentAgent: .claudeCode,
+            routingMode: .manual,
+            persona: AgentPersona(
+                prompt: "Ты — Муни, разработчик и программист.",
+                interactionMode: .automatic
+            )
+        )
+        let store = AppStore(
+            persistence: PersistenceService(stateURL: fixture.stateURL),
+            performAgentDiscovery: false,
+            preferredAgentOrder: { [.codex, .claudeCode, .antigravity] },
+            conversationResponder: responder
+        )
+        store.tasks = [task]
+        store.selection = task.id
+        store.agentInstallations = [
+            AgentInstallation(kind: .codex, executablePath: nil),
+            AgentInstallation(kind: .claudeCode, executablePath: projectCLI.path),
+            AgentInstallation(kind: .antigravity, executablePath: nil)
+        ]
+
+        await store.submitMessage(
+            taskID: task.id,
+            text: "Исправь баг в SwiftUI-коде",
+            attachments: []
+        )
+
+        XCTAssertEqual(store.tasks.first?.chatMessages.last?.text, "PROJECT_OK")
+        let requests = await responder.recordedRequests()
+        XCTAssertTrue(requests.isEmpty)
+    }
+
+    func testCasualMessageRunsOutsideRepositoryWithConversationPrompt() async throws {
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let capturedPromptURL = fixture.root.appendingPathComponent("casual-prompt.txt")
+        let capturedDirectoryURL = fixture.root.appendingPathComponent("casual-working-directory.txt")
+        let successCLI = try makeExecutable(
+            named: "casual-claude-cli",
+            contents: """
+            #!/bin/sh
+            for value in "$@"; do prompt="$value"; done
+            printf '%s' "$prompt" > '\(capturedPromptURL.path)'
+            pwd > '\(capturedDirectoryURL.path)'
+            sleep 0.3
+            printf '{"type":"result","result":"Привет! Я рядом. Как ты сегодня?"}\n'
+            """,
+            in: fixture.root
+        )
+        let task = CodingTask(
+            title: "Стеша",
+            originalRequest: "",
+            repositoryPath: fixture.repository.path,
+            currentAgent: .claudeCode,
+            routingMode: .manual,
+            persona: AgentPersona(
+                prompt: "Ты — Стеша, виртуальная подруга для душевных разговоров.",
+                interactionMode: .automatic
+            )
+        )
+        let store = makeStore(fixture: fixture)
+        store.tasks = [task]
+        store.selection = task.id
+        store.agentInstallations = [
+            AgentInstallation(kind: .codex, executablePath: nil),
+            AgentInstallation(kind: .claudeCode, executablePath: successCLI.path),
+            AgentInstallation(kind: .antigravity, executablePath: nil)
+        ]
+
+        let execution = Swift.Task {
+            await store.submitMessage(taskID: task.id, text: "Привет", attachments: [])
+        }
+        for _ in 0..<100 where store.activeRuns[task.id] == nil {
+            try await Swift.Task.sleep(for: .milliseconds(10))
+        }
+        let activeRun = try XCTUnwrap(store.activeRuns[task.id])
+        XCTAssertEqual(activeRun.interactionMode, .conversation)
+        XCTAssertFalse(activeRun.presentsDetailedActivity)
+        XCTAssertFalse(
+            store.isRepositoryBusyForInteraction(task.repositoryPath),
+            "A casual response must not reserve the project repository"
+        )
+
+        await execution.value
+
+        let updated = try XCTUnwrap(store.tasks.first)
+        XCTAssertTrue(updated.originalRequest.isEmpty)
+        XCTAssertNil(updated.specification)
+        XCTAssertEqual(updated.status, .ready)
+        XCTAssertEqual(
+            updated.chatMessages.last?.text,
+            "Привет! Я рядом. Как ты сегодня?"
+        )
+
+        let prompt = try String(contentsOf: capturedPromptURL, encoding: .utf8)
+        XCTAssertTrue(prompt.contains("обычный личный диалог"))
+        XCTAssertTrue(prompt.contains("виртуальная подруга"))
+        XCTAssertFalse(prompt.contains(fixture.repository.path))
+        XCTAssertFalse(prompt.contains("<task_specification"))
+        XCTAssertFalse(prompt.contains("<<<THIRD_HAND_STATUS>>>"))
+
+        let workingDirectory = try String(
+            contentsOf: capturedDirectoryURL,
+            encoding: .utf8
+        ).trimmingCharacters(in: .whitespacesAndNewlines)
+        XCTAssertNotEqual(workingDirectory, fixture.repository.path)
+        XCTAssertTrue(workingDirectory.contains("Conversation Sessions"))
+    }
+
     func testDeletionRemovesOnlyTaskRecordAndKeepsRepository() throws {
         let fixture = try makeFixture()
         defer { try? FileManager.default.removeItem(at: fixture.root) }
@@ -683,6 +867,26 @@ private actor RecordingHandoffCompressor: AgentHandoffCompressing {
     }
 
     func recordedRequests() -> [AgentHandoffCompressionRequest] {
+        requests
+    }
+}
+
+private actor RecordingConversationResponder: OpenRouterConversationResponding {
+    private let response: OpenRouterConversationResponse?
+    private var requests: [OpenRouterConversationRequest] = []
+
+    init(response: OpenRouterConversationResponse?) {
+        self.response = response
+    }
+
+    func respond(
+        to request: OpenRouterConversationRequest
+    ) async throws -> OpenRouterConversationResponse? {
+        requests.append(request)
+        return response
+    }
+
+    func recordedRequests() -> [OpenRouterConversationRequest] {
         requests
     }
 }

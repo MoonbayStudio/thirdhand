@@ -6,11 +6,27 @@ struct PersistenceLoadState {
     let allowsWrites: Bool
 }
 
+struct GroupChatPersistenceLoadState {
+    let groupChats: [AgentGroupChat]
+    let warning: String?
+    let allowsWrites: Bool
+}
+
 struct PersistenceService {
     private let stateURL: URL
 
     private var backupURL: URL {
         stateURL.appendingPathExtension("backup")
+    }
+
+    private var groupChatsURL: URL {
+        stateURL
+            .deletingLastPathComponent()
+            .appendingPathComponent("group-chats.json")
+    }
+
+    private var groupChatsBackupURL: URL {
+        groupChatsURL.appendingPathExtension("backup")
     }
 
     init(fileManager: FileManager = .default) {
@@ -87,6 +103,78 @@ struct PersistenceService {
 
         let data = try JSONEncoder.thirdHand.encode(tasks)
         try data.write(to: stateURL, options: .atomic)
+    }
+
+    func loadGroupChats() -> GroupChatPersistenceLoadState {
+        guard FileManager.default.fileExists(atPath: groupChatsURL.path) else {
+            return GroupChatPersistenceLoadState(
+                groupChats: [],
+                warning: nil,
+                allowsWrites: true
+            )
+        }
+
+        do {
+            let data = try Data(contentsOf: groupChatsURL)
+            let groupChats = try JSONDecoder.thirdHand.decode(
+                [AgentGroupChat].self,
+                from: data
+            )
+            return GroupChatPersistenceLoadState(
+                groupChats: groupChats,
+                warning: nil,
+                allowsWrites: true
+            )
+        } catch {
+            if let backupData = try? Data(contentsOf: groupChatsBackupURL),
+               let backupChats = try? JSONDecoder.thirdHand.decode(
+                   [AgentGroupChat].self,
+                   from: backupData
+               ) {
+                let corruptArchiveURL = groupChatsURL
+                    .deletingLastPathComponent()
+                    .appendingPathComponent(
+                        "\(groupChatsURL.lastPathComponent).corrupt-\(UUID().uuidString)"
+                    )
+                do {
+                    try FileManager.default.copyItem(
+                        at: groupChatsURL,
+                        to: corruptArchiveURL
+                    )
+                    try backupData.write(to: groupChatsURL, options: .atomic)
+                } catch {
+                    return GroupChatPersistenceLoadState(
+                        groupChats: backupChats,
+                        warning: "Файл групповых чатов повреждён. Резервная копия доступна только для чтения: \(error.localizedDescription)",
+                        allowsWrites: false
+                    )
+                }
+                return GroupChatPersistenceLoadState(
+                    groupChats: backupChats,
+                    warning: "Файл групповых чатов восстановлен из резервной копии. Повреждённый исходник сохранён как \(corruptArchiveURL.lastPathComponent).",
+                    allowsWrites: true
+                )
+            }
+
+            return GroupChatPersistenceLoadState(
+                groupChats: [],
+                warning: "Не удалось прочитать \(groupChatsURL.path). Third Hand не будет перезаписывать повреждённый файл.",
+                allowsWrites: false
+            )
+        }
+    }
+
+    func saveGroupChats(_ groupChats: [AgentGroupChat]) throws {
+        if let existingData = try? Data(contentsOf: groupChatsURL),
+           (try? JSONDecoder.thirdHand.decode(
+               [AgentGroupChat].self,
+               from: existingData
+           )) != nil {
+            try existingData.write(to: groupChatsBackupURL, options: .atomic)
+        }
+
+        let data = try JSONEncoder.thirdHand.encode(groupChats)
+        try data.write(to: groupChatsURL, options: .atomic)
     }
 }
 

@@ -64,6 +64,38 @@ final class OpenRouterServiceTests: XCTestCase {
         XCTAssertTrue(request.context.contains("Sources/App.swift"))
     }
 
+    func testConversationHandoffPreservesDialogueWithoutRepositoryContext() {
+        let task = CodingTask(
+            title: "Стеша",
+            originalRequest: "",
+            repositoryPath: "/private/REPOSITORY_MUST_NOT_APPEAR",
+            messages: [
+                TaskMessage(role: .user, text: "Мне нравится тёплый жёлтый цвет"),
+                TaskMessage(role: .agent, text: "Запомню — он правда уютный")
+            ],
+            persona: AgentPersona(
+                prompt: "Ты — Стеша, добрая собеседница.",
+                interactionMode: .automatic
+            )
+        )
+
+        let request = OpenRouterHandoffPromptBuilder.build(
+            task: task,
+            from: .codex,
+            to: .claudeCode,
+            gitSnapshot: .unavailable,
+            lastAgentOutput: "А ещё можно попробовать…",
+            interactionMode: .conversation
+        )
+
+        XCTAssertEqual(request.interactionMode, .conversation)
+        XCTAssertTrue(request.context.contains("тёплый жёлтый цвет"))
+        XCTAssertTrue(request.context.contains("А ещё можно попробовать"))
+        XCTAssertFalse(request.context.contains("/private/REPOSITORY_MUST_NOT_APPEAR"))
+        XCTAssertFalse(request.context.contains("<git_summary"))
+        XCTAssertFalse(request.context.contains("independently inspect the repository"))
+    }
+
     func testChatCompletionUsesSelectedModelAndParsesCompactHandoff() async throws {
         let session = makeStubbedSession()
         defer { session.invalidateAndCancel() }
@@ -112,6 +144,60 @@ final class OpenRouterServiceTests: XCTestCase {
         XCTAssertEqual(payload["model"] as? String, "provider/handoff-model")
         let encodedBody = String(decoding: body, as: UTF8.self)
         XCTAssertTrue(encodedBody.contains("bounded context"))
+    }
+
+    func testCasualConversationUsesOfficialFreeRouterAndReportsSelectedModel() async throws {
+        let session = makeStubbedSession()
+        defer { session.invalidateAndCancel() }
+        var capturedBody: Data?
+        OpenRouterURLProtocolStub.handler = { request in
+            capturedBody = requestBodyData(request)
+            return (
+                200,
+                Data(
+                    #"{"model":"provider/social-model:free","choices":[{"message":{"role":"assistant","content":"Привет! Как ты сегодня?"}}]}"#.utf8
+                )
+            )
+        }
+
+        let response = try await OpenRouterAPIClient(session: session)
+            .completeConversation(
+                apiKey: "secret-test-key",
+                prompt: "Ты — Стеша. Ответь пользователю: привет"
+            )
+
+        XCTAssertEqual(response.text, "Привет! Как ты сегодня?")
+        XCTAssertEqual(response.modelID, "provider/social-model:free")
+        let body = try XCTUnwrap(capturedBody)
+        let payload = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: body) as? [String: Any]
+        )
+        XCTAssertEqual(
+            payload["model"] as? String,
+            OpenRouterPreferences.freeConversationModelID
+        )
+        XCTAssertTrue(String(decoding: body, as: UTF8.self).contains("Ты — Стеша"))
+    }
+
+    func testConversationServiceSkipsOpenRouterWhenDisabledOrMissingKey() async throws {
+        let disabled = OpenRouterConversationService(
+            credentialStore: StubOpenRouterCredentialStore(apiKey: "secret"),
+            configurationProvider: {
+                OpenRouterConversationConfiguration(isEnabled: false)
+            }
+        )
+        let missingKey = OpenRouterConversationService(
+            credentialStore: StubOpenRouterCredentialStore(apiKey: nil),
+            configurationProvider: {
+                OpenRouterConversationConfiguration(isEnabled: true)
+            }
+        )
+        let request = OpenRouterConversationRequest(prompt: "Привет")
+        let disabledResponse = try await disabled.respond(to: request)
+        let missingKeyResponse = try await missingKey.respond(to: request)
+
+        XCTAssertNil(disabledResponse)
+        XCTAssertNil(missingKeyResponse)
     }
 
     func testKeyValidationAndModelCatalogUseOfficialEndpoints() async throws {
@@ -171,6 +257,14 @@ final class OpenRouterServiceTests: XCTestCase {
         configuration.protocolClasses = [OpenRouterURLProtocolStub.self]
         return URLSession(configuration: configuration)
     }
+}
+
+private struct StubOpenRouterCredentialStore: OpenRouterCredentialStoring {
+    let apiKey: String?
+
+    func loadAPIKey() throws -> String? { apiKey }
+    func saveAPIKey(_ apiKey: String) throws {}
+    func deleteAPIKey() throws {}
 }
 
 private func requestBodyData(_ request: URLRequest) -> Data? {

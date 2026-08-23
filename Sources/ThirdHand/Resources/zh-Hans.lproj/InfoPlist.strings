@@ -1,0 +1,3 @@
+"CFBundleDisplayName" = "Third Hand";
+"NSMicrophoneUsageDescription" = "Third Hand 仅在您口述消息时使用麦克风。";
+"NSSpeechRecognitionUsageDescription" = "Third Hand 将您的口述消息转换为可编辑文本。";

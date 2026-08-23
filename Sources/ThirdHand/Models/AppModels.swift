@@ -11,11 +11,11 @@ enum TaskStatus: String, Codable, CaseIterable, Identifiable {
 
     var title: String {
         switch self {
-        case .ready: "Готова"
-        case .running: "В работе"
-        case .paused: "На паузе"
-        case .needsAttention: "Нужно внимание"
-        case .completed: "Завершена"
+        case .ready: AppLocalization.string("Готова")
+        case .running: AppLocalization.string("В работе")
+        case .paused: AppLocalization.string("На паузе")
+        case .needsAttention: AppLocalization.string("Нужно внимание")
+        case .completed: AppLocalization.string("Завершена")
         }
     }
 
@@ -40,10 +40,10 @@ enum TaskFilter: String, CaseIterable, Identifiable {
 
     var title: String {
         switch self {
-        case .all: "Все задачи"
-        case .running: "В работе"
-        case .needsAttention: "Нужно внимание"
-        case .completed: "Завершённые"
+        case .all: AppLocalization.string("Все задачи")
+        case .running: AppLocalization.string("В работе")
+        case .needsAttention: AppLocalization.string("Нужно внимание")
+        case .completed: AppLocalization.string("Завершённые")
         }
     }
 
@@ -100,9 +100,102 @@ enum AgentRoutingMode: String, Codable, Hashable, Sendable {
 
     var title: String {
         switch self {
-        case .manual: "Вручную"
-        case .automatic: "Авто"
+        case .manual: AppLocalization.string("Вручную")
+        case .automatic: AppLocalization.string("Авто")
         }
+    }
+}
+
+enum AgentInteractionMode: String, Codable, CaseIterable, Hashable, Identifiable, Sendable {
+    case automatic
+    case conversation
+    case workspace
+
+    var id: Self { self }
+
+    var title: String {
+        switch self {
+        case .automatic: AppLocalization.string("Авто")
+        case .conversation: AppLocalization.string("Общение")
+        case .workspace: AppLocalization.string("Проект")
+        }
+    }
+
+    var detail: String {
+        switch self {
+        case .automatic:
+            AppLocalization.string("Простые реплики остаются диалогом, а работа с кодом и проектом получает Git-контекст.")
+        case .conversation:
+            AppLocalization.string("Обычный диалог с памятью чата. Git и файлы проекта не используются.")
+        case .workspace:
+            AppLocalization.string("Агент получает задачу, рабочую папку, Git-контекст и протокол проверок.")
+        }
+    }
+
+    static func inferred(from personalityPrompt: String) -> Self {
+        let normalized = personalityPrompt.lowercased()
+        let workspacePersonaMarkers = [
+            "разработчик", "программист", "инженер по", "тестировщик",
+            "devops", "developer", "programmer", "software engineer",
+            "работай с кодом", "работай с репозитори", "coding agent"
+        ]
+        return workspacePersonaMarkers.contains(where: normalized.contains)
+            ? .workspace
+            : .conversation
+    }
+
+    func resolved(
+        for message: String,
+        personalityPrompt: String,
+        recentMessages: [String] = []
+    ) -> Self {
+        guard self == .automatic else { return self }
+
+        let normalized = " " + message.lowercased() + " "
+        let workspaceIntentMarkers = [
+            "репозитор", " github", " git ", "код", "исходник",
+            "файл проекта", "рабочая папка", "компил", "сборк", "тест",
+            "баг", "рефактор", "коммит", "pull request", "пулл-реквест",
+            "xcode", "swiftui", " swift ", "typescript", "javascript",
+            " python ", "frontend", "backend", " api ", " апи "
+        ]
+        if workspaceIntentMarkers.contains(where: normalized.contains) {
+            return .workspace
+        }
+
+        let casualMarkers = [
+            "привет", "здравств", "хей", "как дела", "как ты", "что нового",
+            "что делаешь", "как настроение", "доброе утро", "добрый день",
+            "добрый вечер", "поговорим", "давай поговор", "расскажи о себе",
+            "расскажи шут", "мне грустно", "спасибо", "благодар", "hello",
+            " hi ", " hey ", "how are you", "thank you"
+        ]
+        if casualMarkers.contains(where: normalized.contains) {
+            return .conversation
+        }
+
+        let workspaceActionMarkers = [
+            "сделай", "исправ", "почин", "поправ", "измени", "добав",
+            "удали", "убери", "выровн", "увелич", "уменьш", "реализ",
+            "запусти", "проверь", "продолж", "перепиш", "напиши функ",
+            "implement", "continue", "inspect", "review", "refactor",
+            "fix ", "change ", "update ", "create ", "add ", "remove ",
+            "run "
+        ]
+        let recentContext = recentMessages
+            .suffix(6)
+            .joined(separator: " ")
+            .lowercased()
+        let hasRecentWorkspaceContext = workspaceIntentMarkers.contains {
+            recentContext.contains($0.trimmingCharacters(in: .whitespaces))
+        }
+        if workspaceActionMarkers.contains(where: normalized.contains),
+           Self.inferred(from: personalityPrompt) == .workspace
+            || hasRecentWorkspaceContext {
+            return .workspace
+        }
+
+        return .conversation
     }
 }
 
@@ -120,6 +213,9 @@ struct AgentOptionID: RawRepresentable, Hashable, Sendable {
     static let permissionMode = Self(rawValue: "permissionMode")
     static let executionMode = Self(rawValue: "executionMode")
     static let sandboxMode = Self(rawValue: "sandboxMode")
+    static let executionSource = Self(rawValue: "executionSource")
+    static let apiProvider = Self(rawValue: "apiProvider")
+    static let apiModel = Self(rawValue: "apiModel")
 }
 
 struct TaskAgentConfiguration: Codable, Hashable, Sendable {
@@ -161,6 +257,7 @@ struct AgentPersona: Codable, Hashable, Sendable {
     var avatarEmoji: String
     var avatarImageData: Data?
     var avatarColor: AgentAvatarColor
+    var interactionMode: AgentInteractionMode?
     var needsReview: Bool
     var onboardingStage: AgentOnboardingStage?
 
@@ -169,6 +266,7 @@ struct AgentPersona: Codable, Hashable, Sendable {
         avatarEmoji: String = "🤖",
         avatarImageData: Data? = nil,
         avatarColor: AgentAvatarColor = .indigo,
+        interactionMode: AgentInteractionMode? = nil,
         needsReview: Bool = false,
         onboardingStage: AgentOnboardingStage? = nil
     ) {
@@ -176,6 +274,7 @@ struct AgentPersona: Codable, Hashable, Sendable {
         self.avatarEmoji = avatarEmoji
         self.avatarImageData = avatarImageData
         self.avatarColor = avatarColor
+        self.interactionMode = interactionMode
         self.needsReview = needsReview
         self.onboardingStage = onboardingStage
     }
@@ -187,8 +286,12 @@ struct AgentProfileDraft: Hashable, Sendable {
     var avatarEmoji: String
     var avatarImageData: Data?
     var avatarColor: AgentAvatarColor
+    var interactionMode: AgentInteractionMode
     var routingMode: AgentRoutingMode
     var agentKind: AgentKind
+    var executionSource: AgentExecutionSource
+    var apiProvider: AIAPIProvider
+    var apiModelID: String
     var configuration: TaskAgentConfiguration
     var repositoryPath: String
     var needsReview: Bool
@@ -199,8 +302,12 @@ struct AgentProfileDraft: Hashable, Sendable {
         avatarEmoji: String = "🤖",
         avatarImageData: Data? = nil,
         avatarColor: AgentAvatarColor = .indigo,
+        interactionMode: AgentInteractionMode = .automatic,
         routingMode: AgentRoutingMode = .automatic,
         agentKind: AgentKind = .codex,
+        executionSource: AgentExecutionSource = .cli,
+        apiProvider: AIAPIProvider = .openRouter,
+        apiModelID: String = "",
         configuration: TaskAgentConfiguration = TaskAgentConfiguration(),
         repositoryPath: String,
         needsReview: Bool = false
@@ -210,8 +317,12 @@ struct AgentProfileDraft: Hashable, Sendable {
         self.avatarEmoji = avatarEmoji
         self.avatarImageData = avatarImageData
         self.avatarColor = avatarColor
+        self.interactionMode = interactionMode
         self.routingMode = routingMode
         self.agentKind = agentKind
+        self.executionSource = executionSource
+        self.apiProvider = apiProvider
+        self.apiModelID = apiModelID
         self.configuration = configuration
         self.repositoryPath = repositoryPath
         self.needsReview = needsReview
@@ -225,8 +336,14 @@ struct AgentProfileDraft: Hashable, Sendable {
             avatarEmoji: persona.avatarEmoji,
             avatarImageData: persona.avatarImageData,
             avatarColor: persona.avatarColor,
+            interactionMode: task.effectiveInteractionMode,
             routingMode: task.effectiveRoutingMode,
             agentKind: task.currentAgent ?? fallbackAgent,
+            executionSource: task.configuredExecutionSource,
+            apiProvider: task.configuredAPIProvider ?? AIAPIPreferences.preferredProvider(),
+            apiModelID: task.configuredAPIModelID
+                ?? task.configuredAPIProvider.map { AIAPIPreferences.primaryModelID(for: $0) }
+                ?? "",
             configuration: task.agentConfiguration ?? TaskAgentConfiguration(),
             repositoryPath: task.repositoryPath,
             needsReview: persona.needsReview
@@ -408,6 +525,14 @@ struct SemanticHandoff: Codable, Hashable {
     )
 }
 
+struct ConversationHandoff: Codable, Hashable {
+    var facts: [String]
+    var recentContext: [String]
+    var openThreads: [String]
+    var nextReply: String
+    var updatedAt: Date
+}
+
 enum ValidationOutcome: String, Codable {
     case passed
     case failed
@@ -417,11 +542,11 @@ enum ValidationOutcome: String, Codable {
 
     var title: String {
         switch self {
-        case .passed: "Успешно"
-        case .failed: "Ошибка"
-        case .running: "Выполняется"
-        case .cancelled: "Остановлено"
-        case .notRun: "Не запускалось"
+        case .passed: AppLocalization.string("Успешно")
+        case .failed: AppLocalization.string("Ошибка")
+        case .running: AppLocalization.string("Выполняется")
+        case .cancelled: AppLocalization.string("Остановлено")
+        case .notRun: AppLocalization.string("Не запускалось")
         }
     }
 }
@@ -604,6 +729,8 @@ struct TaskMessage: Identifiable, Codable, Hashable {
     let text: String
     let createdAt: Date
     let attachments: [TaskAttachment]?
+    let executionSource: AgentExecutionSource?
+    let executionTargetName: String?
 
     var fileAttachments: [TaskAttachment] {
         attachments ?? []
@@ -614,13 +741,17 @@ struct TaskMessage: Identifiable, Codable, Hashable {
         role: TaskMessageRole,
         text: String,
         createdAt: Date = .now,
-        attachments: [TaskAttachment]? = nil
+        attachments: [TaskAttachment]? = nil,
+        executionSource: AgentExecutionSource? = nil,
+        executionTargetName: String? = nil
     ) {
         self.id = id
         self.role = role
         self.text = text
         self.createdAt = createdAt
         self.attachments = attachments
+        self.executionSource = executionSource
+        self.executionTargetName = executionTargetName
     }
 }
 
@@ -643,6 +774,7 @@ struct CodingTask: Identifiable, Codable, Hashable {
     var activity: [ActivityEvent]
     var messages: [TaskMessage]?
     var persona: AgentPersona?
+    var conversationHandoff: ConversationHandoff?
     let createdAt: Date
     var updatedAt: Date
 
@@ -663,6 +795,31 @@ struct CodingTask: Identifiable, Codable, Hashable {
         routingMode ?? .manual
     }
 
+    var configuredExecutionSource: AgentExecutionSource {
+        guard effectiveRoutingMode == .manual else { return .cli }
+        return agentConfiguration?[.executionSource]
+            .flatMap(AgentExecutionSource.init(rawValue:)) ?? .cli
+    }
+
+    var configuredAPIProvider: AIAPIProvider? {
+        agentConfiguration?[.apiProvider].flatMap(AIAPIProvider.init(rawValue:))
+    }
+
+    var configuredAPIModelID: String? {
+        let modelID = agentConfiguration?[.apiModel]?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return modelID.isEmpty ? nil : modelID
+    }
+
+    var configuredAPITarget: AIAPITarget? {
+        guard let provider = configuredAPIProvider,
+              let modelID = configuredAPIModelID
+        else {
+            return nil
+        }
+        return AIAPITarget(provider: provider, modelID: modelID)
+    }
+
     var effectiveSpecification: TaskSpecification {
         specification ?? TaskSpecification(objective: originalRequest)
     }
@@ -673,6 +830,13 @@ struct CodingTask: Identifiable, Codable, Hashable {
             avatarEmoji: "🤖",
             avatarColor: .indigo
         )
+    }
+
+    var effectiveInteractionMode: AgentInteractionMode {
+        if let explicitMode = persona?.interactionMode {
+            return explicitMode
+        }
+        return .automatic
     }
 
     var onboardingStage: AgentOnboardingStage? {
@@ -707,6 +871,7 @@ struct CodingTask: Identifiable, Codable, Hashable {
         activity: [ActivityEvent] = [],
         messages: [TaskMessage]? = [],
         persona: AgentPersona? = nil,
+        conversationHandoff: ConversationHandoff? = nil,
         createdAt: Date = .now,
         updatedAt: Date = .now
     ) {
@@ -728,6 +893,7 @@ struct CodingTask: Identifiable, Codable, Hashable {
         self.activity = activity
         self.messages = messages
         self.persona = persona
+        self.conversationHandoff = conversationHandoff
         self.createdAt = createdAt
         self.updatedAt = updatedAt
     }

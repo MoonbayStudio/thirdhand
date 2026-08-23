@@ -127,6 +127,7 @@ final class AgentOnboardingTests: XCTestCase {
 
         XCTAssertEqual(profile.name, "Луна")
         XCTAssertEqual(profile.avatarColor, .teal)
+        XCTAssertEqual(profile.interactionMode, .automatic)
         XCTAssertEqual(profile.routingMode, .automatic)
         XCTAssertNil(profile.agentKind)
         XCTAssertThrowsError(

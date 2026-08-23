@@ -112,32 +112,45 @@ struct InspectorView: View {
         }
 
         return VStack(alignment: .leading, spacing: 12) {
-            InspectorSectionTitle(run == nil ? "Текущий агент" : "Сейчас выполняется")
+            InspectorSectionTitle(
+                run?.presentsDetailedActivity == true
+                    ? "Сейчас выполняется"
+                    : "Текущий агент"
+            )
 
             HStack(spacing: 12) {
                 AgentAvatar(kind: run?.agent ?? task.currentAgent, compact: true)
 
                 VStack(alignment: .leading, spacing: 2) {
-                    Text((run?.agent ?? task.currentAgent)?.displayName ?? "Агент не назначен")
+                    Text(
+                        run?.executionTarget.displayName
+                            ?? store.preferredExecutionTarget(for: task).displayName
+                    )
                         .font(.headline)
-                    Text(run == nil ? task.status.title : "Активная CLI-попытка")
+                    Text(
+                        run == nil
+                            ? task.status.title
+                            : run?.presentsDetailedActivity == true
+                                ? "Активная \(run?.executionTarget.source.title ?? "CLI")-попытка"
+                                : "Печатает через \(run?.executionTarget.source.title ?? "CLI")"
+                    )
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
 
                 Spacer()
 
-                if let run {
-                    ActivityPulse(tint: run.agent.tint, compact: true)
+                if let run, run.presentsDetailedActivity {
+                    ActivityPulse(tint: run.executionTarget.tint, compact: true)
                 }
             }
 
-            if let run, let activity {
+            if let run, run.presentsDetailedActivity, let activity {
                 Divider()
 
                 HStack(alignment: .top, spacing: 9) {
                     Image(systemName: activity.current.systemImage)
-                        .foregroundStyle(run.agent.tint)
+                        .foregroundStyle(run.executionTarget.tint)
                         .frame(width: 16)
 
                     VStack(alignment: .leading, spacing: 2) {
@@ -159,8 +172,8 @@ struct InspectorView: View {
             LabeledContent(
                 "Маршрутизация",
                 value: task.effectiveRoutingMode == .automatic
-                    ? "Авто → \(store.effectiveAgent(for: task).shortName)"
-                    : "Вручную"
+                    ? "Авто · CLI → API"
+                    : "Вручную · \(store.preferredExecutionTarget(for: task).shortName)"
             )
             LabeledContent("Checkpoints", value: "\(task.checkpoints.count)")
             LabeledContent(

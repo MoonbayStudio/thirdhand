@@ -11,6 +11,7 @@ DIST_DIR="$ROOT_DIR/dist"
 APP_BUNDLE="$DIST_DIR/Third Hand.app"
 APP_CONTENTS="$APP_BUNDLE/Contents"
 APP_MACOS="$APP_CONTENTS/MacOS"
+APP_RESOURCES="$APP_CONTENTS/Resources"
 APP_BINARY="$APP_MACOS/$APP_NAME"
 INFO_PLIST="$APP_CONTENTS/Info.plist"
 
@@ -27,9 +28,20 @@ swift_build
 BUILD_BINARY="$(swift_build --show-bin-path)/$APP_NAME"
 
 rm -rf "$APP_BUNDLE"
-mkdir -p "$APP_MACOS"
+mkdir -p "$APP_MACOS" "$APP_RESOURCES"
 cp "$BUILD_BINARY" "$APP_BINARY"
 chmod +x "$APP_BINARY"
+
+RESOURCE_BUNDLE="$(dirname "$BUILD_BINARY")/ThirdHand_ThirdHand.bundle"
+if [[ -d "$RESOURCE_BUNDLE" ]]; then
+  cp -R "$RESOURCE_BUNDLE" "$APP_BUNDLE/"
+  cp -R "$RESOURCE_BUNDLE" "$APP_RESOURCES/"
+  for localization in "$RESOURCE_BUNDLE"/*.lproj; do
+    if [[ -d "$localization" ]]; then
+      cp -R "$localization" "$APP_RESOURCES/"
+    fi
+  done
+fi
 
 cat >"$INFO_PLIST" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -44,6 +56,30 @@ cat >"$INFO_PLIST" <<PLIST
   <string>Third Hand</string>
   <key>CFBundleDisplayName</key>
   <string>Third Hand</string>
+  <key>CFBundleDevelopmentRegion</key>
+  <string>ru</string>
+  <key>CFBundleLocalizations</key>
+  <array>
+    <string>ru</string>
+    <string>en</string>
+    <string>de</string>
+    <string>fr</string>
+    <string>es</string>
+    <string>it</string>
+    <string>pt-BR</string>
+    <string>pl</string>
+    <string>tr</string>
+    <string>uk</string>
+    <string>be</string>
+    <string>kk</string>
+    <string>uz</string>
+    <string>ky</string>
+    <string>tg</string>
+    <string>tk</string>
+    <string>zh-Hans</string>
+    <string>ja</string>
+    <string>ko</string>
+  </array>
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>LSMinimumSystemVersion</key>
@@ -52,6 +88,10 @@ cat >"$INFO_PLIST" <<PLIST
   <string>NSApplication</string>
   <key>NSHighResolutionCapable</key>
   <true/>
+  <key>NSMicrophoneUsageDescription</key>
+  <string>Third Hand использует микрофон только во время голосового ввода сообщения.</string>
+  <key>NSSpeechRecognitionUsageDescription</key>
+  <string>Third Hand преобразует продиктованное сообщение в редактируемый текст.</string>
 </dict>
 </plist>
 PLIST

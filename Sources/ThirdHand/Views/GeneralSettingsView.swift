@@ -13,8 +13,8 @@ struct GeneralSettingsView: View {
     @State private var notificationPermissionWasDenied = false
 
     var body: some View {
-        Form {
-            Section("Выполнение") {
+        WideSettingsLayout {
+            WideSettingsSection("Выполнение") {
                 LabeledContent("Checkpoint при передаче") {
                     Text("Всегда")
                         .foregroundStyle(.secondary)
@@ -25,15 +25,18 @@ struct GeneralSettingsView: View {
                     .foregroundStyle(.secondary)
             }
 
-            Section("Репозитории") {
+            WideSettingsSection("Репозитории") {
                 LabeledContent("Папка по умолчанию") {
                     HStack(spacing: 8) {
-                        Text(defaultRepositoriesFolderPath.isEmpty
-                            ? "Не выбрана"
-                            : defaultRepositoriesFolderPath)
-                            .foregroundStyle(defaultRepositoriesFolderPath.isEmpty ? .secondary : .primary)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
+                        if defaultRepositoriesFolderPath.isEmpty {
+                            Text("Не выбрана")
+                                .foregroundStyle(.secondary)
+                        } else {
+                            Text(defaultRepositoriesFolderPath)
+                                .foregroundStyle(.primary)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                        }
 
                         if !defaultRepositoriesFolderPath.isEmpty {
                             Button {
@@ -57,7 +60,7 @@ struct GeneralSettingsView: View {
                     .foregroundStyle(.secondary)
             }
 
-            Section("Уведомления") {
+            WideSettingsSection("Уведомления") {
                 Toggle("Разрешить уведомления", isOn: $notificationsEnabled)
 
                 Toggle("Когда требуется ответ", isOn: $notificationQuestions)
@@ -91,8 +94,6 @@ struct GeneralSettingsView: View {
                 }
             }
         }
-        .formStyle(.grouped)
-        .scrollContentBackground(.hidden)
         .fileImporter(
             isPresented: $isChoosingRepositoriesFolder,
             allowedContentTypes: [.folder],

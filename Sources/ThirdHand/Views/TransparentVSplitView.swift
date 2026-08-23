@@ -23,6 +23,11 @@ struct TransparentVSplitView<Top: View, Bottom: View>: NSViewRepresentable {
         splitView.isVertical = false
         splitView.delegate = context.coordinator
 
+        let coordinator = context.coordinator
+        splitView.onLayout = { [weak coordinator] splitView in
+            coordinator?.applyInitialPosition(to: splitView)
+        }
+
         let topHostingView = NSHostingView(rootView: top)
         let bottomHostingView = NSHostingView(rootView: bottom)
         splitView.addArrangedSubview(topHostingView)
@@ -34,7 +39,6 @@ struct TransparentVSplitView<Top: View, Bottom: View>: NSViewRepresentable {
         context.coordinator.bottomHostingView = bottomHostingView
         context.coordinator.topHostingView = topHostingView
 
-        let coordinator = context.coordinator
         DispatchQueue.main.async { [weak splitView] in
             guard let splitView else { return }
             coordinator.applyInitialPosition(to: splitView)
@@ -61,6 +65,7 @@ struct TransparentVSplitView<Top: View, Bottom: View>: NSViewRepresentable {
     }
 
     static func dismantleNSView(_ splitView: NSSplitView, coordinator: Coordinator) {
+        (splitView as? InvisibleDividerSplitView)?.onLayout = nil
         splitView.delegate = nil
     }
 
@@ -106,6 +111,10 @@ struct TransparentVSplitView<Top: View, Bottom: View>: NSViewRepresentable {
                 return
             }
 
+            // A detail view can be created while a sheet is still closing, when
+            // the split view temporarily has no usable height. Mark the position
+            // before changing frames so the resulting layout pass cannot recurse.
+            didApplyInitialPosition = true
             splitView.adjustSubviews()
             splitView.setPosition(
                 clampedDividerPosition(
@@ -114,7 +123,6 @@ struct TransparentVSplitView<Top: View, Bottom: View>: NSViewRepresentable {
                 ),
                 ofDividerAt: 0
             )
-            didApplyInitialPosition = true
         }
 
         func splitView(
@@ -173,8 +181,15 @@ struct TransparentVSplitView<Top: View, Bottom: View>: NSViewRepresentable {
 }
 
 private final class InvisibleDividerSplitView: NSSplitView {
+    var onLayout: ((NSSplitView) -> Void)?
+
     override var dividerColor: NSColor { .clear }
     override var dividerThickness: CGFloat { 0 }
+
+    override func layout() {
+        super.layout()
+        onLayout?(self)
+    }
 
     override func drawDivider(in rect: NSRect) {}
 }

@@ -32,8 +32,12 @@ struct NewTaskSheet: View {
     @State private var avatarImageData: Data?
     @State private var avatarColor: AgentAvatarColor = .indigo
     @State private var routingMode: AgentRoutingMode = .automatic
+    @State private var executionSource: AgentExecutionSource = .cli
     @State private var agentKind: AgentKind = .codex
     @State private var modelID = ""
+    @State private var apiProvider: AIAPIProvider = .openRouter
+    @State private var apiModelID = ""
+    @State private var isShowingAPIModelPicker = false
     @State private var repositoryURL: URL?
     @State private var importTarget: ImportTarget = .repository
     @State private var isChoosingFile = false
@@ -56,6 +60,9 @@ struct NewTaskSheet: View {
         case .manual:
             return !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                 && !personalityPrompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                && !(routingMode == .manual
+                    && executionSource == .api
+                    && apiModelID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
         }
     }
 
@@ -85,6 +92,9 @@ struct NewTaskSheet: View {
         .onChange(of: agentKind) {
             resetModelSelection()
         }
+        .onChange(of: apiProvider) {
+            apiModelID = AIAPIPreferences.primaryModelID(for: apiProvider)
+        }
         .fileImporter(
             isPresented: $isChoosingFile,
             allowedContentTypes: importTarget == .avatar ? [.image] : [.folder],
@@ -104,6 +114,13 @@ struct NewTaskSheet: View {
             }
         } message: {
             Text(importError ?? "Попробуйте ещё раз.")
+        }
+        .sheet(isPresented: $isShowingAPIModelPicker) {
+            APIModelPicker(
+                title: "Модель \(apiProvider.displayName)",
+                models: AIAPIPreferences.cachedModels(for: apiProvider),
+                selectedModelID: $apiModelID
+            )
         }
     }
 
@@ -242,20 +259,47 @@ struct NewTaskSheet: View {
                     .pickerStyle(.segmented)
 
                     if routingMode == .manual {
-                        Picker("Провайдер", selection: $agentKind) {
-                            ForEach(AgentKind.allCases) { kind in
-                                Text(kind.displayName).tag(kind)
-                            }
+                        Picker("Способ запуска", selection: $executionSource) {
+                            Text("CLI").tag(AgentExecutionSource.cli)
+                            Text("API").tag(AgentExecutionSource.api)
                         }
+                        .pickerStyle(.segmented)
 
-                        Picker("Модель", selection: $modelID) {
-                            ForEach(capabilities.models) { model in
-                                Text(model.title).tag(model.id)
+                        if executionSource == .cli {
+                            Picker("CLI", selection: $agentKind) {
+                                ForEach(AgentKind.allCases) { kind in
+                                    Text(kind.displayName).tag(kind)
+                                }
+                            }
+
+                            Picker("Модель", selection: $modelID) {
+                                ForEach(capabilities.models) { model in
+                                    Text(model.title).tag(model.id)
+                                }
+                            }
+                        } else {
+                            Picker("API", selection: $apiProvider) {
+                                ForEach(AIAPIProvider.allCases) { provider in
+                                    Text(provider.displayName).tag(provider)
+                                }
+                            }
+
+                            LabeledContent("Модель") {
+                                HStack(spacing: 7) {
+                                    TextField("ID модели", text: $apiModelID)
+                                        .textFieldStyle(.roundedBorder)
+                                    Button("Выбрать…") {
+                                        isShowingAPIModelPicker = true
+                                    }
+                                    .disabled(
+                                        AIAPIPreferences.cachedModels(for: apiProvider).isEmpty
+                                    )
+                                }
                             }
                         }
                     } else {
                         Label(
-                            "Third Hand переключится на следующий доступный CLI только после подтверждённой ошибки лимита.",
+                            "Third Hand пройдёт доступные CLI, а затем подключённые API. Переключение происходит только после подтверждённой ошибки лимита.",
                             systemImage: "arrow.triangle.2.circlepath"
                         )
                         .font(.caption)
@@ -330,6 +374,8 @@ struct NewTaskSheet: View {
             agentKind = available
         }
         resetModelSelection()
+        apiProvider = AIAPIPreferences.preferredProvider()
+        apiModelID = AIAPIPreferences.primaryModelID(for: apiProvider)
     }
 
     private func resetModelSelection() {
@@ -366,6 +412,9 @@ struct NewTaskSheet: View {
                 avatarColor: seed.avatarColor,
                 routingMode: .automatic,
                 agentKind: agentKind,
+                executionSource: .cli,
+                apiProvider: apiProvider,
+                apiModelID: apiModelID,
                 repositoryPath: repositoryURL.path,
                 needsReview: true
             )
@@ -382,6 +431,9 @@ struct NewTaskSheet: View {
                 avatarColor: avatarColor,
                 routingMode: routingMode,
                 agentKind: agentKind,
+                executionSource: executionSource,
+                apiProvider: apiProvider,
+                apiModelID: apiModelID,
                 configuration: configuration,
                 repositoryPath: repositoryURL.path
             )

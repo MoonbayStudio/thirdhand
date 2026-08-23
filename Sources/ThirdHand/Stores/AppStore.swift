@@ -5,6 +5,7 @@ import Observation
 @Observable
 final class AppStore {
     var tasks: [CodingTask]
+    var groupChats: [AgentGroupChat]
     var selection: UUID?
     var selectedFilter: TaskFilter = .all
     var agentInstallations: [AgentInstallation] = AgentKind.allCases.map {
@@ -12,6 +13,7 @@ final class AppStore {
     }
     var agentCapabilities = AgentCapabilityCatalog.fallback
     var activeRuns: [UUID: AgentRunState] = [:]
+    var activeGroupRuns: [UUID: GroupChatRunState] = [:]
     var liveAgentOutputs: [UUID: AgentLiveOutput] = [:]
     var activeValidations: [UUID: ValidationExecutionState] = [:]
     var liveGitSnapshots: [UUID: GitSnapshot] = [:]
@@ -20,9 +22,11 @@ final class AppStore {
     )
     var isShowingInspector = true
     var isShowingSettings = false
+    var isShowingNewGroupChatSheet = false
     var isRefreshingGit = false
     var isRefreshingUsage = false
     var taskPendingDeletion: UUID?
+    var groupChatPendingDeletion: UUID?
     var lastError: String?
 
     private let persistence: PersistenceService
@@ -35,6 +39,8 @@ final class AppStore {
     private let providerUsageService: any ProviderUsageProviding
     private let notificationService: any TaskNotificationSending
     private let handoffCompressor: any AgentHandoffCompressing
+    private let conversationResponder: any OpenRouterConversationResponding
+    private let apiExecutor: any AIAPIExecuting
     private let preferredAgentOrderProvider: () -> [AgentKind]
     private let usageAutoRefreshInterval: Duration
     private var persistenceAllowsWrites = true
@@ -42,6 +48,16 @@ final class AppStore {
     private var activeHandoffCompressionTasks: [
         UUID: Swift.Task<CompressedAgentHandoff?, Error>
     ] = [:]
+    private var activeConversationResponseTasks: [
+        UUID: Swift.Task<OpenRouterConversationResponse?, Error>
+    ] = [:]
+    private var activeAPIExecutionTasks: [
+        UUID: Swift.Task<AIAPIExecutionResponse, Error>
+    ] = [:]
+    private var activeGroupConversationResponseTasks: [
+        UUID: Swift.Task<OpenRouterConversationResponse?, Error>
+    ] = [:]
+    private var cancelledGroupChatIDs: Set<UUID> = []
     private var pendingUsageRefresh = false
     private var pendingUsageRefreshClearsInferredExhaustion = false
     private var lastProviderUsageRefreshAt: Date?
@@ -55,19 +71,37 @@ final class AppStore {
         preferredAgentOrder: @escaping () -> [AgentKind] = {
             AgentRoutingPreferences.load()
         },
-        handoffCompressor: any AgentHandoffCompressing = DisabledAgentHandoffCompressor()
+        handoffCompressor: any AgentHandoffCompressing = DisabledAgentHandoffCompressor(),
+        conversationResponder: any OpenRouterConversationResponding = DisabledOpenRouterConversationResponder(),
+        apiExecutor: any AIAPIExecuting = DisabledAIAPIExecutor()
     ) {
         self.persistence = persistence
         self.notificationService = notificationService
         self.providerUsageService = providerUsageService
         self.handoffCompressor = handoffCompressor
+        self.conversationResponder = conversationResponder
+        self.apiExecutor = apiExecutor
         self.usageAutoRefreshInterval = usageAutoRefreshInterval
         preferredAgentOrderProvider = preferredAgentOrder
         let loadedState = persistence.loadTasks()
+        let loadedGroupState = persistence.loadGroupChats()
         tasks = loadedState.tasks
+        groupChats = loadedGroupState.groupChats.map { storedChat in
+            var chat = storedChat
+            if chat.status == .discussing {
+                chat.status = .ready
+            }
+            return chat
+        }
         persistenceAllowsWrites = loadedState.allowsWrites
-        lastError = loadedState.warning
-        selection = tasks.first?.id
+            && loadedGroupState.allowsWrites
+        lastError = [loadedState.warning, loadedGroupState.warning]
+            .compactMap { $0 }
+            .joined(separator: "\n")
+        if lastError?.isEmpty == true {
+            lastError = nil
+        }
+        selection = tasks.first?.id ?? groupChats.first?.id
         resumePendingOnboardingIntroductions()
 
         if performAgentDiscovery {
@@ -76,7 +110,7 @@ final class AppStore {
                 agentInstallations = installations
                 agentCapabilities = await agentCapabilityDetector.detect(installations: installations)
                 await refreshProviderUsage()
-                if let selection {
+                if let selection, tasks.contains(where: { $0.id == selection }) {
                     await refreshGit(
                         taskID: selection,
                         recordActivity: false
@@ -91,8 +125,26 @@ final class AppStore {
         return tasks.first { $0.id == selection }
     }
 
+    var selectedGroupChat: AgentGroupChat? {
+        guard let selection else { return nil }
+        return groupChats.first { $0.id == selection }
+    }
+
+    var sortedGroupChats: [AgentGroupChat] {
+        groupChats.sorted { lhs, rhs in
+            if lhs.updatedAt == rhs.updatedAt {
+                return lhs.createdAt > rhs.createdAt
+            }
+            return lhs.updatedAt > rhs.updatedAt
+        }
+    }
+
     var automaticAgentOrder: [AgentKind] {
         preferredAgentOrderProvider()
+    }
+
+    var availableAPITargets: [AIAPITarget] {
+        apiExecutor.availableTargets()
     }
 
     var filteredTasks: [CodingTask] {
@@ -128,6 +180,39 @@ final class AppStore {
             preferredOrder: automaticAgentOrder,
             usageSnapshots: providerUsage
         ).first ?? .codex
+    }
+
+    func preferredExecutionTarget(for task: CodingTask) -> AgentExecutionTarget {
+        if task.effectiveRoutingMode == .manual,
+           task.configuredExecutionSource == .api,
+           let target = task.configuredAPITarget {
+            return .api(target)
+        }
+        return .cli(effectiveAgent(for: task))
+    }
+
+    func executionTargets(for task: CodingTask) -> [AgentExecutionTarget] {
+        if task.effectiveRoutingMode == .manual {
+            if task.configuredExecutionSource == .api,
+               let target = task.configuredAPITarget {
+                return [.api(target)]
+            }
+            return AutomaticAgentRouter.candidates(
+                for: task,
+                installations: agentInstallations,
+                preferredOrder: automaticAgentOrder,
+                usageSnapshots: providerUsage
+            ).map(AgentExecutionTarget.cli)
+        }
+
+        let cliTargets = AutomaticAgentRouter.candidates(
+            for: task,
+            installations: agentInstallations,
+            preferredOrder: automaticAgentOrder,
+            usageSnapshots: providerUsage
+        ).map(AgentExecutionTarget.cli)
+        let apiTargets = apiExecutor.availableTargets().map(AgentExecutionTarget.api)
+        return cliTargets + apiTargets
     }
 
     func displayedGitSnapshot(for task: CodingTask) -> GitSnapshot {
@@ -275,18 +360,20 @@ final class AppStore {
             return
         }
 
+        let storedConfiguration = Self.configuration(for: profile)
         var task = CodingTask(
             title: name,
             originalRequest: "",
             repositoryPath: repositoryPath,
             currentAgent: profile.agentKind,
             routingMode: profile.routingMode,
-            agentConfiguration: profile.configuration.isEmpty ? nil : profile.configuration,
+            agentConfiguration: storedConfiguration.isEmpty ? nil : storedConfiguration,
             persona: AgentPersona(
                 prompt: prompt,
                 avatarEmoji: profile.avatarEmoji,
                 avatarImageData: profile.avatarImageData,
                 avatarColor: profile.avatarColor,
+                interactionMode: profile.interactionMode,
                 needsReview: profile.needsReview
             )
         )
@@ -307,6 +394,124 @@ final class AppStore {
         await detectValidationRecipes(taskID: task.id)
     }
 
+    var groupChatEligibleAgents: [CodingTask] {
+        agents.filter { $0.onboardingStage == nil }
+    }
+
+    func participants(for group: AgentGroupChat) -> [CodingTask] {
+        group.participantIDs.compactMap { participantID in
+            tasks.first { $0.id == participantID }
+        }
+    }
+
+    func mentionedParticipants(
+        in text: String,
+        group: AgentGroupChat
+    ) -> [CodingTask] {
+        AgentNameMentionResolver.mentionedParticipants(
+            in: text,
+            participants: participants(for: group)
+        )
+    }
+
+    @discardableResult
+    func createGroupChat(title: String, participantIDs: [UUID]) -> UUID? {
+        let participants = participantIDs.compactMap { participantID in
+            groupChatEligibleAgents.first { $0.id == participantID }
+        }
+        let uniqueParticipants = participants.reduce(into: [CodingTask]()) { result, participant in
+            guard !result.contains(where: { $0.id == participant.id }) else { return }
+            result.append(participant)
+        }
+        guard uniqueParticipants.count >= 2 else {
+            lastError = "Для группового чата выберите минимум двух готовых агентов."
+            return nil
+        }
+        guard uniqueParticipants.count <= 8 else {
+            lastError = "В одном групповом чате может быть не больше восьми агентов."
+            return nil
+        }
+
+        let normalizedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        let resolvedTitle = normalizedTitle.isEmpty
+            ? uniqueParticipants.map(\.title).joined(separator: ", ")
+            : normalizedTitle
+        let introduction = GroupChatPromptBuilder.participantIntroduction(uniqueParticipants)
+        let group = AgentGroupChat(
+            title: resolvedTitle,
+            participantIDs: uniqueParticipants.map(\.id),
+            messages: [
+                GroupChatMessage(role: .system, text: introduction)
+            ]
+        )
+        groupChats.insert(group, at: 0)
+        selection = group.id
+        isShowingInspector = true
+        isShowingNewGroupChatSheet = false
+        persist()
+        return group.id
+    }
+
+    func renameGroupChat(_ groupID: UUID, title: String) {
+        let normalizedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedTitle.isEmpty else { return }
+        mutateGroupChat(groupID) { group in
+            group.title = normalizedTitle
+        }
+    }
+
+    func updateGroupParticipants(_ participantIDs: [UUID], groupID: UUID) {
+        guard activeGroupRuns[groupID] == nil,
+              let currentGroup = groupChats.first(where: { $0.id == groupID })
+        else {
+            lastError = "Состав группы нельзя менять во время обсуждения."
+            return
+        }
+
+        let participants = participantIDs.compactMap { participantID in
+            groupChatEligibleAgents.first { $0.id == participantID }
+        }
+        let uniqueParticipants = participants.reduce(into: [CodingTask]()) { result, participant in
+            guard !result.contains(where: { $0.id == participant.id }) else { return }
+            result.append(participant)
+        }
+        guard uniqueParticipants.count >= 2 else {
+            lastError = "В групповом чате должно остаться минимум два агента."
+            return
+        }
+        guard uniqueParticipants.count <= 8 else {
+            lastError = "В одном групповом чате может быть не больше восьми агентов."
+            return
+        }
+
+        let previousIDs = Set(currentGroup.participantIDs)
+        let nextIDs = Set(uniqueParticipants.map(\.id))
+        let added = uniqueParticipants.filter { !previousIDs.contains($0.id) }
+        let removedNames = currentGroup.participantIDs
+            .filter { !nextIDs.contains($0) }
+            .compactMap { removedID in tasks.first(where: { $0.id == removedID })?.title }
+
+        mutateGroupChat(groupID) { group in
+            group.participantIDs = uniqueParticipants.map(\.id)
+            if !added.isEmpty {
+                group.messages.append(
+                    GroupChatMessage(
+                        role: .system,
+                        text: "В чат добавлены: \(added.map(\.title).joined(separator: ", "))."
+                    )
+                )
+            }
+            if !removedNames.isEmpty {
+                group.messages.append(
+                    GroupChatMessage(
+                        role: .system,
+                        text: "Из чата вышли: \(removedNames.joined(separator: ", "))."
+                    )
+                )
+            }
+        }
+    }
+
     @discardableResult
     func updateAgentProfile(_ profile: AgentProfileDraft, for taskID: UUID) -> Bool {
         guard activeRuns[taskID] == nil, activeValidations[taskID] == nil else {
@@ -323,17 +528,19 @@ final class AppStore {
         }
 
         let previousPath = tasks.first(where: { $0.id == taskID })?.repositoryPath
+        let storedConfiguration = Self.configuration(for: profile)
         mutateTask(taskID) { task in
             task.title = name
             task.repositoryPath = repositoryPath
             task.routingMode = profile.routingMode
             task.currentAgent = profile.agentKind
-            task.agentConfiguration = profile.configuration.isEmpty ? nil : profile.configuration
+            task.agentConfiguration = storedConfiguration.isEmpty ? nil : storedConfiguration
             task.persona = AgentPersona(
                 prompt: prompt,
                 avatarEmoji: profile.avatarEmoji,
                 avatarImageData: profile.avatarImageData,
                 avatarColor: profile.avatarColor,
+                interactionMode: profile.interactionMode,
                 needsReview: false
             )
             task.activity.insert(
@@ -393,12 +600,22 @@ final class AppStore {
             break
         }
 
-        guard !isRepositoryBusy(
-            submittedTask.repositoryPath,
-            excludingValidationTaskID: nil
-        ) else {
-            lastError = "Сначала дождитесь завершения агента или проверки в этом репозитории."
-            return
+        let interactionMode = submittedTask.effectiveInteractionMode.resolved(
+            for: messageText,
+            personalityPrompt: submittedTask.effectivePersona.prompt,
+            recentMessages: submittedTask.chatMessages
+                .filter { $0.role != .system }
+                .suffix(6)
+                .map(\.text)
+        )
+        if interactionMode == .workspace {
+            guard !isRepositoryBusy(
+                submittedTask.repositoryPath,
+                excludingValidationTaskID: nil
+            ) else {
+                lastError = "Сначала дождитесь завершения агента или проверки в этом репозитории."
+                return
+            }
         }
 
         mutateTask(taskID) { task in
@@ -413,7 +630,7 @@ final class AppStore {
             task.messages = messages
             task.status = .running
 
-            if task.originalRequest.isEmpty {
+            if interactionMode == .workspace, task.originalRequest.isEmpty {
                 task.originalRequest = messageText
                 task.specification = TaskSpecification(objective: messageText)
                 task.activity.insert(
@@ -428,19 +645,25 @@ final class AppStore {
         }
 
         guard let task = tasks.first(where: { $0.id == taskID }) else { return }
-        let candidates = AutomaticAgentRouter.candidates(
-            for: task,
-            installations: agentInstallations,
-            preferredOrder: automaticAgentOrder,
-            usageSnapshots: providerUsage
-        )
+        if task.effectiveRoutingMode == .automatic,
+           interactionMode == .conversation,
+           attachments.isEmpty,
+           await answerConversationThroughOpenRouter(
+               taskID: taskID,
+               task: task,
+               messageText: messageText
+           ) {
+            return
+        }
 
-        guard let firstAgent = candidates.first else {
+        let candidates = executionTargets(for: task)
+
+        guard let firstTarget = candidates.first else {
             appendExecutionError(
                 AgentExecutionError.launchFailed(
                     task.effectiveRoutingMode == .automatic
-                        ? "В Auto нет доступного агента с оставшимся лимитом. Проверьте CLI и порядок провайдеров в Settings."
-                        : "Ни один официальный CLI не найден."
+                        ? "В Auto нет доступного CLI или подключённого API. Проверьте раздел API в настройках."
+                        : "Выбранный CLI или API не настроен."
                 ),
                 to: taskID
             )
@@ -450,54 +673,63 @@ final class AppStore {
         var pendingAttemptID = UUID()
         activeRuns[taskID] = AgentRunState(
             attemptID: pendingAttemptID,
-            agent: firstAgent,
+            agent: firstTarget.fallbackAgentKind,
+            executionTarget: firstTarget,
+            interactionMode: interactionMode,
             phase: .preparing,
             startedAt: .now
         )
         liveAgentOutputs[taskID] = .empty
-        let monitor = Swift.Task { [weak self] in
-            await self?.monitorRepository(taskID: taskID)
-        }
+        let monitor: Swift.Task<Void, Never>? = interactionMode == .workspace
+            ? Swift.Task { [weak self] in
+                await self?.monitorRepository(taskID: taskID)
+            }
+            : nil
 
-        executionLoop: for (candidateIndex, agent) in candidates.enumerated() {
+        executionLoop: for (candidateIndex, target) in candidates.enumerated() {
+            let agent = target.fallbackAgentKind
             let attemptID = pendingAttemptID
             if activeRuns[taskID]?.attemptID != attemptID {
                 activeRuns[taskID] = AgentRunState(
                     attemptID: attemptID,
                     agent: agent,
+                    executionTarget: target,
+                    interactionMode: interactionMode,
                     phase: .preparing,
                     startedAt: .now
                 )
             }
 
-            guard let executablePath = agentInstallations
-                .first(where: { $0.kind == agent })?
-                .executablePath
-            else {
-                appendExecutionError(
-                    AgentExecutionError.executableUnavailable(agent),
-                    to: taskID
-                )
-                break executionLoop
-            }
-
             var preflightSnapshot: GitSnapshot?
-            if let currentTask = tasks.first(where: { $0.id == taskID }),
+            if case .cli = target,
+               let currentTask = tasks.first(where: { $0.id == taskID }),
                currentTask.currentAgent != agent {
-                let freshSnapshot = await gitService.snapshot(
-                    at: URL(fileURLWithPath: currentTask.repositoryPath)
-                )
+                let freshSnapshot: GitSnapshot
+                if interactionMode == .workspace {
+                    freshSnapshot = await gitService.snapshot(
+                        at: URL(fileURLWithPath: currentTask.repositoryPath)
+                    )
+                } else {
+                    freshSnapshot = .unavailable
+                }
                 guard activeRuns[taskID]?.attemptID == attemptID else {
                     break executionLoop
                 }
-                liveGitSnapshots[taskID] = freshSnapshot
-                selectExecutionAgent(agent, for: taskID, snapshot: freshSnapshot)
+                if interactionMode == .workspace {
+                    liveGitSnapshots[taskID] = freshSnapshot
+                }
+                selectExecutionAgent(
+                    agent,
+                    for: taskID,
+                    snapshot: freshSnapshot,
+                    interactionMode: interactionMode
+                )
                 preflightSnapshot = freshSnapshot
             }
             guard var taskSnapshot = tasks.first(where: { $0.id == taskID }) else {
                 break executionLoop
             }
-            if preflightSnapshot == nil {
+            if interactionMode == .workspace, preflightSnapshot == nil {
                 preflightSnapshot = await gitService.snapshot(
                     at: URL(fileURLWithPath: taskSnapshot.repositoryPath)
                 )
@@ -505,51 +737,56 @@ final class AppStore {
                     break executionLoop
                 }
             }
-            guard let preflightSnapshot else {
-                break executionLoop
+            if interactionMode == .workspace, let preflightSnapshot {
+                liveGitSnapshots[taskID] = preflightSnapshot
+                taskSnapshot.gitSnapshot = preflightSnapshot
             }
-            liveGitSnapshots[taskID] = preflightSnapshot
-            taskSnapshot.gitSnapshot = preflightSnapshot
             let retainedAttachments = Self.retainedAttachments(in: taskSnapshot)
 
-            let repositoryContext = await gitService.handoffContext(
-                at: URL(fileURLWithPath: taskSnapshot.repositoryPath)
-            )
-            guard activeRuns[taskID]?.attemptID == attemptID else {
-                break executionLoop
+            let prompt: String
+            let workingDirectory: String
+            let isGitRepository: Bool
+            if interactionMode == .workspace {
+                let repositoryContext = await gitService.handoffContext(
+                    at: URL(fileURLWithPath: taskSnapshot.repositoryPath)
+                )
+                guard activeRuns[taskID]?.attemptID == attemptID else {
+                    break executionLoop
+                }
+                prompt = TaskEnvelopeBuilder.build(
+                    task: taskSnapshot,
+                    currentInstruction: messageText,
+                    attachments: retainedAttachments,
+                    repositoryContext: repositoryContext
+                )
+                workingDirectory = taskSnapshot.repositoryPath
+                isGitRepository = repositoryContext.isGitRepository
+            } else {
+                prompt = ConversationEnvelopeBuilder.build(
+                    task: taskSnapshot,
+                    currentInstruction: messageText,
+                    attachments: retainedAttachments
+                )
+                workingDirectory = conversationWorkingDirectory(for: taskID)
+                isGitRepository = false
             }
 
-            let prompt = TaskEnvelopeBuilder.build(
-                task: taskSnapshot,
-                currentInstruction: messageText,
-                attachments: retainedAttachments,
-                repositoryContext: repositoryContext
-            )
-            let configuration = resolvedConfiguration(for: taskSnapshot)
             if activeRuns[taskID]?.phase != .stopping {
                 activeRuns[taskID]?.phase = .running
             }
 
-            let request = AgentExecutionRequest(
-                attemptID: attemptID,
-                taskID: taskID,
-                agent: agent,
-                executablePath: executablePath,
-                repositoryPath: taskSnapshot.repositoryPath,
-                prompt: prompt,
-                configuration: configuration,
-                attachments: retainedAttachments,
-                isGitRepository: repositoryContext.isGitRepository
-            )
-
             do {
-                let response = try await taskOrchestrator.execute(request) { [weak self] output in
-                    await self?.recordLiveAgentOutput(
-                        output,
-                        taskID: taskID,
-                        attemptID: attemptID
-                    )
-                }
+                let responseText = try await execute(
+                    target: target,
+                    attemptID: attemptID,
+                    taskID: taskID,
+                    task: taskSnapshot,
+                    repositoryPath: workingDirectory,
+                    prompt: prompt,
+                    attachments: retainedAttachments,
+                    isGitRepository: isGitRepository,
+                    interactionMode: interactionMode
+                )
                 guard activeRuns[taskID]?.attemptID == attemptID else {
                     break executionLoop
                 }
@@ -559,23 +796,41 @@ final class AppStore {
                     break executionLoop
                 }
 
-                let parsedResponse = AgentProgressReportParser.parse(response.text)
-                let completionSnapshot = await gitService.snapshot(
-                    at: URL(fileURLWithPath: taskSnapshot.repositoryPath)
-                )
+                let parsedResponse = AgentProgressReportParser.parse(responseText)
+                let completionSnapshot: GitSnapshot
+                if interactionMode == .workspace {
+                    completionSnapshot = await gitService.snapshot(
+                        at: URL(fileURLWithPath: taskSnapshot.repositoryPath)
+                    )
+                } else {
+                    completionSnapshot = .unavailable
+                }
                 guard activeRuns[taskID]?.attemptID == attemptID else {
                     break executionLoop
                 }
-                liveGitSnapshots[taskID] = completionSnapshot
+                if interactionMode == .workspace {
+                    liveGitSnapshots[taskID] = completionSnapshot
+                }
                 mutateTask(taskID) { task in
-                    task.gitSnapshot = completionSnapshot
+                    if interactionMode == .workspace {
+                        task.gitSnapshot = completionSnapshot
+                    }
                     var messages = task.messages ?? []
                     messages.append(
-                        TaskMessage(role: .agent, text: parsedResponse.displayText)
+                        TaskMessage(
+                            role: .agent,
+                            text: parsedResponse.displayText,
+                            executionSource: target.source,
+                            executionTargetName: target.displayName
+                        )
                     )
                     task.messages = messages
                     task.status = .ready
-                    if let progressReport = parsedResponse.progressReport {
+                    if interactionMode == .conversation {
+                        task.conversationHandoff = nil
+                    }
+                    if interactionMode == .workspace,
+                       let progressReport = parsedResponse.progressReport {
                         let isReadyForReview = Self.applyProgressReport(
                             progressReport,
                             to: &task
@@ -590,8 +845,12 @@ final class AppStore {
                     }
                     task.activity.insert(
                         ActivityEvent(
-                            title: "Попытка агента завершена",
-                            detail: "\(agent.displayName) вернул финальный ответ.",
+                            title: interactionMode == .conversation
+                                ? "Ответ получен"
+                                : "Попытка агента завершена",
+                            detail: interactionMode == .conversation
+                                ? "\(target.displayName) продолжил диалог через \(target.source.title)."
+                                : "\(target.displayName) вернул финальный ответ через \(target.source.title).",
                             systemImage: "checkmark.circle"
                         ),
                         at: 0
@@ -604,7 +863,7 @@ final class AppStore {
                     ) ? .question : .resultReady
                 )
                 break executionLoop
-            } catch let executionError as AgentExecutionError {
+            } catch {
                 guard activeRuns[taskID]?.attemptID == attemptID else {
                     break executionLoop
                 }
@@ -615,27 +874,47 @@ final class AppStore {
                     break executionLoop
                 }
 
-                if case .usageLimitExceeded = executionError {
-                    markProviderExhausted(agent)
+                let quotaWasExceeded: Bool
+                if let executionError = error as? AgentExecutionError,
+                   case .usageLimitExceeded = executionError {
+                    if case .cli = target {
+                        markProviderExhausted(agent)
+                    }
+                    quotaWasExceeded = true
+                } else if let apiError = error as? AIAPIError {
+                    quotaWasExceeded = apiError.isQuotaExceeded
+                } else {
+                    quotaWasExceeded = false
+                }
+
+                if quotaWasExceeded {
                     let nextIndex = candidateIndex + 1
                     let canFailOver = taskSnapshot.effectiveRoutingMode == .automatic
                         && candidates.indices.contains(nextIndex)
 
                     if canFailOver {
-                        let nextAgent = candidates[nextIndex]
+                        let nextTarget = candidates[nextIndex]
+                        let nextAgent = nextTarget.fallbackAgentKind
                         let nextAttemptID = UUID()
                         pendingAttemptID = nextAttemptID
                         activeRuns[taskID] = AgentRunState(
                             attemptID: nextAttemptID,
                             agent: nextAgent,
+                            executionTarget: nextTarget,
+                            interactionMode: interactionMode,
                             phase: .compressingContext,
                             startedAt: .now
                         )
                         let interruptedOutput = liveAgentOutputs[taskID]?.text
 
-                        let freshSnapshot = await gitService.snapshot(
-                            at: URL(fileURLWithPath: taskSnapshot.repositoryPath)
-                        )
+                        let freshSnapshot: GitSnapshot
+                        if interactionMode == .workspace {
+                            freshSnapshot = await gitService.snapshot(
+                                at: URL(fileURLWithPath: taskSnapshot.repositoryPath)
+                            )
+                        } else {
+                            freshSnapshot = .unavailable
+                        }
                         guard activeRuns[taskID]?.attemptID == nextAttemptID else {
                             break executionLoop
                         }
@@ -646,7 +925,9 @@ final class AppStore {
                             appendExecutionError(AgentExecutionError.cancelled, to: taskID)
                             break executionLoop
                         }
-                        liveGitSnapshots[taskID] = freshSnapshot
+                        if interactionMode == .workspace {
+                            liveGitSnapshots[taskID] = freshSnapshot
+                        }
 
                         let handoffTask = tasks.first(where: { $0.id == taskID })
                             ?? taskSnapshot
@@ -655,7 +936,8 @@ final class AppStore {
                             from: agent,
                             to: nextAgent,
                             gitSnapshot: freshSnapshot,
-                            lastAgentOutput: interruptedOutput
+                            lastAgentOutput: interruptedOutput,
+                            interactionMode: interactionMode
                         )
                         var compressedHandoff: CompressedAgentHandoff?
                         var compressionFailure: String?
@@ -688,9 +970,10 @@ final class AppStore {
                         liveAgentOutputs[taskID] = .empty
                         recordAutomaticFailover(
                             taskID: taskID,
-                            from: agent,
-                            to: nextAgent,
+                            from: target,
+                            to: nextTarget,
                             snapshot: freshSnapshot,
+                            interactionMode: interactionMode,
                             compressedHandoff: compressedHandoff,
                             compressionFailure: compressionFailure
                         )
@@ -698,28 +981,381 @@ final class AppStore {
                     }
                 }
 
-                appendExecutionError(executionError, to: taskID)
-                break executionLoop
-            } catch {
-                guard activeRuns[taskID]?.attemptID == attemptID else {
-                    break executionLoop
-                }
-                if activeRuns[taskID]?.phase == .stopping {
-                    await taskOrchestrator.discardPendingCancellation(attemptID: attemptID)
-                    appendExecutionError(AgentExecutionError.cancelled, to: taskID)
-                    break executionLoop
-                }
                 appendExecutionError(error, to: taskID)
                 break executionLoop
             }
         }
 
-        monitor.cancel()
+        monitor?.cancel()
         activeRuns[taskID] = nil
         liveAgentOutputs[taskID] = nil
         liveGitSnapshots[taskID] = nil
-        await refreshGit(taskID: taskID)
+        if interactionMode == .workspace {
+            await refreshGit(taskID: taskID)
+        }
         await refreshProviderUsage()
+    }
+
+    func submitGroupMessage(groupID: UUID, text: String) async {
+        let messageText = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !messageText.isEmpty,
+              activeGroupRuns[groupID] == nil,
+              let submittedGroup = groupChats.first(where: { $0.id == groupID })
+        else {
+            return
+        }
+
+        let allParticipants = participants(for: submittedGroup)
+        guard allParticipants.count >= 2 else {
+            lastError = "Добавьте в групповой чат минимум двух доступных агентов."
+            return
+        }
+
+        let mentioned = AgentNameMentionResolver.mentionedParticipants(
+            in: messageText,
+            participants: allParticipants
+        )
+        let speakers = mentioned.isEmpty ? allParticipants : mentioned
+        let totalTurns = speakers.count == 1
+            ? 1
+            : min(speakers.count * 2, 6)
+        cancelledGroupChatIDs.remove(groupID)
+
+        mutateGroupChat(groupID) { group in
+            group.messages.append(
+                GroupChatMessage(role: .user, text: messageText)
+            )
+            group.status = .discussing
+        }
+
+        var successfulTurns = 0
+        for turnIndex in 0..<totalTurns {
+            guard !cancelledGroupChatIDs.contains(groupID),
+                  let currentGroup = groupChats.first(where: { $0.id == groupID })
+            else {
+                finishCancelledGroupDiscussion(groupID)
+                return
+            }
+
+            let scheduledSpeaker = speakers[turnIndex % speakers.count]
+            guard let speaker = tasks.first(where: { $0.id == scheduledSpeaker.id }) else {
+                continue
+            }
+            let prompt = GroupChatPromptBuilder.discussionPrompt(
+                group: currentGroup,
+                participants: participants(for: currentGroup),
+                speaker: speaker,
+                currentUserMessage: messageText,
+                turn: turnIndex + 1,
+                totalTurns: totalTurns
+            )
+
+            do {
+                let response = try await performGroupResponse(
+                    groupID: groupID,
+                    participant: speaker,
+                    prompt: prompt,
+                    phase: .discussing
+                )
+                guard !cancelledGroupChatIDs.contains(groupID) else {
+                    finishCancelledGroupDiscussion(groupID)
+                    return
+                }
+                let executionTarget = activeGroupRuns[groupID]?.executionTarget
+                mutateGroupChat(groupID) { group in
+                    group.messages.append(
+                        GroupChatMessage(
+                            role: .agent,
+                            text: response,
+                            senderAgentID: speaker.id,
+                            senderName: speaker.title,
+                            executionSource: executionTarget?.source,
+                            executionTargetName: executionTarget?.displayName
+                        )
+                    )
+                }
+                successfulTurns += 1
+            } catch {
+                if groupRunWasCancelled(error, groupID: groupID) {
+                    finishCancelledGroupDiscussion(groupID)
+                    return
+                }
+                mutateGroupChat(groupID) { group in
+                    group.messages.append(
+                        GroupChatMessage(
+                            role: .system,
+                            text: "\(speaker.title) не смог ответить: \(groupErrorDescription(error))"
+                        )
+                    )
+                }
+            }
+        }
+
+        guard successfulTurns > 0 else {
+            mutateGroupChat(groupID) { $0.status = .needsAttention }
+            clearGroupRun(groupID)
+            await refreshProviderUsage()
+            return
+        }
+
+        if speakers.count >= 2,
+           successfulTurns >= 2,
+           let currentGroup = groupChats.first(where: { $0.id == groupID }),
+           let facilitator = tasks.first(where: { $0.id == speakers[0].id }) {
+            let summaryPrompt = GroupChatPromptBuilder.summaryPrompt(
+                group: currentGroup,
+                participants: participants(for: currentGroup),
+                facilitator: facilitator,
+                currentUserMessage: messageText
+            )
+            do {
+                let summary = try await performGroupResponse(
+                    groupID: groupID,
+                    participant: facilitator,
+                    prompt: summaryPrompt,
+                    phase: .summarizing
+                )
+                guard !cancelledGroupChatIDs.contains(groupID) else {
+                    finishCancelledGroupDiscussion(groupID)
+                    return
+                }
+                let executionTarget = activeGroupRuns[groupID]?.executionTarget
+                mutateGroupChat(groupID) { group in
+                    group.messages.append(
+                        GroupChatMessage(
+                            role: .summary,
+                            text: summary,
+                            senderAgentID: facilitator.id,
+                            senderName: facilitator.title,
+                            executionSource: executionTarget?.source,
+                            executionTargetName: executionTarget?.displayName
+                        )
+                    )
+                    group.status = .ready
+                }
+            } catch {
+                if groupRunWasCancelled(error, groupID: groupID) {
+                    finishCancelledGroupDiscussion(groupID)
+                    return
+                }
+                mutateGroupChat(groupID) { group in
+                    group.messages.append(
+                        GroupChatMessage(
+                            role: .system,
+                            text: "Не удалось подготовить итог обсуждения: \(groupErrorDescription(error))"
+                        )
+                    )
+                    group.status = .needsAttention
+                }
+            }
+        } else {
+            mutateGroupChat(groupID) { $0.status = .ready }
+        }
+
+        clearGroupRun(groupID)
+        await refreshProviderUsage()
+    }
+
+    private func performGroupResponse(
+        groupID: UUID,
+        participant: CodingTask,
+        prompt: String,
+        phase: GroupChatRunPhase
+    ) async throws -> String {
+        guard !cancelledGroupChatIDs.contains(groupID) else {
+            throw CancellationError()
+        }
+
+        var attemptID = UUID()
+        let preferredTarget = preferredExecutionTarget(for: participant)
+        let preferredAgent = preferredTarget.fallbackAgentKind
+        activeGroupRuns[groupID] = GroupChatRunState(
+            attemptID: attemptID,
+            currentAgentID: participant.id,
+            currentAgentName: participant.title,
+            currentAgentKind: preferredAgent,
+            executionTarget: preferredTarget,
+            phase: phase,
+            startedAt: .now
+        )
+
+        if participant.effectiveRoutingMode == .automatic {
+            if let quickTarget = AIAPIPreferences.primaryTarget() {
+                activeGroupRuns[groupID] = GroupChatRunState(
+                    attemptID: attemptID,
+                    currentAgentID: participant.id,
+                    currentAgentName: participant.title,
+                    currentAgentKind: AgentExecutionTarget.api(quickTarget).fallbackAgentKind,
+                    executionTarget: .api(quickTarget),
+                    phase: phase,
+                    startedAt: .now
+                )
+            }
+            let responseTask = Swift.Task { [conversationResponder] in
+                try await conversationResponder.respond(
+                    to: OpenRouterConversationRequest(prompt: prompt)
+                )
+            }
+            activeGroupConversationResponseTasks[groupID] = responseTask
+            do {
+                let response = try await responseTask.value
+                activeGroupConversationResponseTasks[groupID] = nil
+                guard !cancelledGroupChatIDs.contains(groupID),
+                      activeGroupRuns[groupID]?.attemptID == attemptID
+                else {
+                    throw CancellationError()
+                }
+                if let response {
+                    let text = response.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard !text.isEmpty else { throw AgentExecutionError.emptyResponse }
+                    return text
+                }
+            } catch {
+                activeGroupConversationResponseTasks[groupID] = nil
+                if groupRunWasCancelled(error, groupID: groupID) {
+                    throw CancellationError()
+                }
+            }
+        }
+
+        let candidates = executionTargets(for: participant)
+        guard !candidates.isEmpty else {
+            throw AgentExecutionError.launchFailed(
+                "Для \(participant.title) не найден доступный CLI или подключённый API."
+            )
+        }
+
+        for (candidateIndex, target) in candidates.enumerated() {
+            guard !cancelledGroupChatIDs.contains(groupID) else {
+                throw CancellationError()
+            }
+            let agent = target.fallbackAgentKind
+
+            attemptID = UUID()
+            activeGroupRuns[groupID] = GroupChatRunState(
+                attemptID: attemptID,
+                currentAgentID: participant.id,
+                currentAgentName: participant.title,
+                currentAgentKind: agent,
+                executionTarget: target,
+                phase: phase,
+                startedAt: .now
+            )
+            do {
+                let responseText: String
+                switch target {
+                case let .cli(cliAgent):
+                    guard let executablePath = agentInstallations
+                        .first(where: { $0.kind == cliAgent })?
+                        .executablePath
+                    else {
+                        throw AgentExecutionError.executableUnavailable(cliAgent)
+                    }
+                    let request = AgentExecutionRequest(
+                        attemptID: attemptID,
+                        taskID: groupID,
+                        agent: cliAgent,
+                        executablePath: executablePath,
+                        repositoryPath: conversationWorkingDirectory(for: groupID),
+                        prompt: prompt,
+                        configuration: resolvedGroupConfiguration(
+                            for: participant,
+                            agent: cliAgent
+                        ),
+                        attachments: [],
+                        isGitRepository: false
+                    )
+                    responseText = try await taskOrchestrator.execute(request).text
+                case let .api(apiTarget):
+                    let apiTask = Swift.Task { [apiExecutor] in
+                        try await apiExecutor.execute(
+                            AIAPIExecutionRequest(
+                                target: apiTarget,
+                                prompt: prompt,
+                                maximumOutputTokens: 2_048
+                            )
+                        )
+                    }
+                    activeAPIExecutionTasks[groupID] = apiTask
+                    do {
+                        responseText = try await apiTask.value.text
+                        activeAPIExecutionTasks[groupID] = nil
+                    } catch {
+                        activeAPIExecutionTasks[groupID] = nil
+                        throw error
+                    }
+                }
+                guard !cancelledGroupChatIDs.contains(groupID),
+                      activeGroupRuns[groupID]?.attemptID == attemptID
+                else {
+                    throw CancellationError()
+                }
+                let text = AgentProgressReportParser.parse(responseText)
+                    .displayText
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !text.isEmpty else { throw AgentExecutionError.emptyResponse }
+                return text
+            } catch {
+                if groupRunWasCancelled(error, groupID: groupID) {
+                    throw CancellationError()
+                }
+                let quotaWasExceeded: Bool
+                if let executionError = error as? AgentExecutionError,
+                   case .usageLimitExceeded = executionError {
+                    markProviderExhausted(agent)
+                    quotaWasExceeded = true
+                } else if let apiError = error as? AIAPIError {
+                    quotaWasExceeded = apiError.isQuotaExceeded
+                } else {
+                    quotaWasExceeded = false
+                }
+                if quotaWasExceeded,
+                   participant.effectiveRoutingMode == .automatic,
+                   candidates.indices.contains(candidateIndex + 1) {
+                    continue
+                }
+                throw error
+            }
+        }
+
+        throw AgentExecutionError.launchFailed(
+            "Ни один настроенный провайдер не смог ответить от имени \(participant.title)."
+        )
+    }
+
+    private func finishCancelledGroupDiscussion(_ groupID: UUID) {
+        mutateGroupChat(groupID) { group in
+            group.messages.append(
+                GroupChatMessage(
+                    role: .system,
+                    text: "Обсуждение остановлено. Уже полученные реплики сохранены."
+                )
+            )
+            group.status = .ready
+        }
+        clearGroupRun(groupID)
+    }
+
+    private func groupRunWasCancelled(_ error: Error, groupID: UUID) -> Bool {
+        if cancelledGroupChatIDs.contains(groupID) || error is CancellationError {
+            return true
+        }
+        if let executionError = error as? AgentExecutionError,
+           case .cancelled = executionError {
+            return true
+        }
+        return false
+    }
+
+    private func groupErrorDescription(_ error: Error) -> String {
+        (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+    }
+
+    private func clearGroupRun(_ groupID: UUID) {
+        activeGroupConversationResponseTasks[groupID] = nil
+        activeAPIExecutionTasks[groupID] = nil
+        activeGroupRuns[groupID] = nil
+        cancelledGroupChatIDs.remove(groupID)
     }
 
     private func configureAgentProfile(
@@ -781,6 +1417,7 @@ final class AppStore {
         activeRuns[taskID] = AgentRunState(
             attemptID: pendingAttemptID,
             agent: firstAgent,
+            interactionMode: .conversation,
             phase: .preparing,
             startedAt: .now
         )
@@ -795,6 +1432,7 @@ final class AppStore {
             activeRuns[taskID] = AgentRunState(
                 attemptID: attemptID,
                 agent: agent,
+                interactionMode: .conversation,
                 phase: .running,
                 startedAt: .now
             )
@@ -931,6 +1569,7 @@ final class AppStore {
                 avatarEmoji: previousPersona.avatarEmoji,
                 avatarImageData: previousPersona.avatarImageData,
                 avatarColor: profile.avatarColor,
+                interactionMode: profile.interactionMode,
                 needsReview: true
             )
             var messages = task.messages ?? []
@@ -967,6 +1606,7 @@ final class AppStore {
                 avatarEmoji: previousPersona.avatarEmoji,
                 avatarImageData: previousPersona.avatarImageData,
                 avatarColor: profile.avatarColor,
+                interactionMode: profile.interactionMode,
                 needsReview: true
             )
             var messages = task.messages ?? []
@@ -1008,21 +1648,46 @@ final class AppStore {
         guard var run = activeRuns[taskID] else { return }
         run.phase = .stopping
         activeRuns[taskID] = run
+        activeConversationResponseTasks[taskID]?.cancel()
+        activeAPIExecutionTasks[taskID]?.cancel()
         activeHandoffCompressionTasks[taskID]?.cancel()
         await taskOrchestrator.cancel(taskID: taskID, attemptID: run.attemptID)
     }
 
+    func stopGroupChat(groupID: UUID) async {
+        guard let run = activeGroupRuns[groupID] else { return }
+        cancelledGroupChatIDs.insert(groupID)
+        if let apiTask = activeAPIExecutionTasks[groupID] {
+            apiTask.cancel()
+        } else if let responseTask = activeGroupConversationResponseTasks[groupID] {
+            responseTask.cancel()
+        } else {
+            await taskOrchestrator.cancel(
+                taskID: groupID,
+                attemptID: run.attemptID
+            )
+        }
+    }
+
     func deleteSelectedTask() {
         guard let selection else { return }
-        requestTaskDeletion(selection)
+        if tasks.contains(where: { $0.id == selection }) {
+            requestTaskDeletion(selection)
+        } else if groupChats.contains(where: { $0.id == selection }) {
+            requestGroupChatDeletion(selection)
+        }
     }
 
     func requestTaskDeletion(_ taskID: UUID) {
         guard tasks.contains(where: { $0.id == taskID }) else { return }
         guard activeRuns[taskID] == nil,
-              activeValidations[taskID] == nil
+              activeValidations[taskID] == nil,
+              !activeGroupRuns.keys.contains(where: { groupID in
+                  groupChats.first(where: { $0.id == groupID })?
+                      .participantIDs.contains(taskID) == true
+              })
         else {
-            lastError = "Сначала остановите работающего агента или проверку."
+            lastError = "Сначала остановите работающего агента, проверку или групповое обсуждение с его участием."
             return
         }
         taskPendingDeletion = taskID
@@ -1038,10 +1703,24 @@ final class AppStore {
             return
         }
 
+        let removedName = tasks.first(where: { $0.id == taskID })?.title ?? "Агент"
         tasks.removeAll { $0.id == taskID }
+        for index in groupChats.indices where groupChats[index].participantIDs.contains(taskID) {
+            groupChats[index].participantIDs.removeAll { $0 == taskID }
+            groupChats[index].messages.append(
+                GroupChatMessage(
+                    role: .system,
+                    text: "\(removedName) удалён из Third Hand и больше не участвует в этом чате."
+                )
+            )
+            if groupChats[index].participantIDs.count < 2 {
+                groupChats[index].status = .needsAttention
+            }
+            groupChats[index].updatedAt = .now
+        }
         liveGitSnapshots[taskID] = nil
         if selection == taskID {
-            selection = agents.first?.id
+            selection = agents.first?.id ?? sortedGroupChats.first?.id
         }
         taskPendingDeletion = nil
         persist()
@@ -1052,6 +1731,35 @@ final class AppStore {
 
     func cancelTaskDeletion() {
         taskPendingDeletion = nil
+    }
+
+    func requestGroupChatDeletion(_ groupID: UUID) {
+        guard groupChats.contains(where: { $0.id == groupID }) else { return }
+        guard activeGroupRuns[groupID] == nil else {
+            lastError = "Сначала остановите групповое обсуждение."
+            return
+        }
+        groupChatPendingDeletion = groupID
+    }
+
+    func confirmGroupChatDeletion() {
+        guard let groupID = groupChatPendingDeletion else { return }
+        guard activeGroupRuns[groupID] == nil else {
+            groupChatPendingDeletion = nil
+            lastError = "Сначала остановите групповое обсуждение."
+            return
+        }
+
+        groupChats.removeAll { $0.id == groupID }
+        if selection == groupID {
+            selection = sortedGroupChats.first?.id ?? agents.first?.id
+        }
+        groupChatPendingDeletion = nil
+        persist()
+    }
+
+    func cancelGroupChatDeletion() {
+        groupChatPendingDeletion = nil
     }
 
     func startOrResume(_ id: UUID) {
@@ -1138,7 +1846,12 @@ final class AppStore {
         guard activeRuns[taskID] == nil else { return }
         mutateTask(taskID) { task in
             task.routingMode = .manual
-            guard task.currentAgent != kind else { return }
+            if task.currentAgent == kind {
+                var configuration = task.agentConfiguration ?? TaskAgentConfiguration()
+                configuration[.executionSource] = AgentExecutionSource.cli.rawValue
+                task.agentConfiguration = configuration
+                return
+            }
             let previous = task.currentAgent
             let requiresHandoff = previous != nil && task.status == .running
             Self.applyAgentSelection(
@@ -1146,6 +1859,29 @@ final class AppStore {
                 previous: previous,
                 requiresHandoff: requiresHandoff,
                 to: &task
+            )
+            var configuration = task.agentConfiguration ?? TaskAgentConfiguration()
+            configuration[.executionSource] = AgentExecutionSource.cli.rawValue
+            task.agentConfiguration = configuration
+        }
+    }
+
+    func selectAPI(_ target: AIAPITarget, for taskID: UUID) {
+        guard activeRuns[taskID] == nil else { return }
+        mutateTask(taskID) { task in
+            task.routingMode = .manual
+            var configuration = task.agentConfiguration ?? TaskAgentConfiguration()
+            configuration[.executionSource] = AgentExecutionSource.api.rawValue
+            configuration[.apiProvider] = target.provider.rawValue
+            configuration[.apiModel] = target.modelID
+            task.agentConfiguration = configuration
+            task.activity.insert(
+                ActivityEvent(
+                    title: "API назначен агенту",
+                    detail: "Следующий ответ выполнит \(target.displayName).",
+                    systemImage: "key.horizontal"
+                ),
+                at: 0
             )
         }
     }
@@ -1753,6 +2489,145 @@ final class AppStore {
         return directory.path
     }
 
+    private func conversationWorkingDirectory(for taskID: UUID) -> String {
+        let support = FileManager.default.urls(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask
+        )[0]
+        let directory = support
+            .appendingPathComponent("Third Hand", isDirectory: true)
+            .appendingPathComponent("Conversation Sessions", isDirectory: true)
+            .appendingPathComponent(taskID.uuidString, isDirectory: true)
+        try? FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true
+        )
+        return directory.path
+    }
+
+    private func answerConversationThroughOpenRouter(
+        taskID: UUID,
+        task: CodingTask,
+        messageText: String
+    ) async -> Bool {
+        let attemptID = UUID()
+        let quickTarget = AIAPIPreferences.primaryTarget()
+            .map(AgentExecutionTarget.api)
+            ?? .cli(task.currentAgent ?? .codex)
+        activeRuns[taskID] = AgentRunState(
+            attemptID: attemptID,
+            agent: quickTarget.fallbackAgentKind,
+            executionTarget: quickTarget,
+            interactionMode: .conversation,
+            phase: .running,
+            startedAt: .now
+        )
+        liveAgentOutputs[taskID] = .empty
+
+        let prompt = ConversationEnvelopeBuilder.build(
+            task: task,
+            currentInstruction: messageText,
+            attachments: []
+        )
+        let responseTask = Swift.Task { [conversationResponder] in
+            try await conversationResponder.respond(
+                to: OpenRouterConversationRequest(prompt: prompt)
+            )
+        }
+        activeConversationResponseTasks[taskID] = responseTask
+
+        do {
+            guard let response = try await responseTask.value else {
+                clearOpenRouterConversationRun(taskID: taskID, attemptID: attemptID)
+                return false
+            }
+            guard activeRuns[taskID]?.attemptID == attemptID else {
+                activeConversationResponseTasks[taskID] = nil
+                return true
+            }
+            if activeRuns[taskID]?.phase == .stopping {
+                appendExecutionError(AgentExecutionError.cancelled, to: taskID)
+                clearOpenRouterConversationRun(taskID: taskID, attemptID: attemptID)
+                return true
+            }
+
+            mutateTask(taskID) { task in
+                var messages = task.messages ?? []
+                messages.append(
+                    TaskMessage(
+                        role: .agent,
+                        text: response.text,
+                        executionSource: .api,
+                        executionTargetName: response.modelID
+                    )
+                )
+                task.messages = messages
+                task.status = .ready
+                task.conversationHandoff = nil
+                task.activity.insert(
+                    ActivityEvent(
+                        title: "Быстрый ответ получен",
+                        detail: "\(response.modelID) ответил через API.",
+                        systemImage: "bolt.circle"
+                    ),
+                    at: 0
+                )
+            }
+            scheduleNotification(
+                taskID: taskID,
+                kind: AgentQuestionSuggestions.requiresUserResponse(from: response.text)
+                    ? .question
+                    : .resultReady
+            )
+            clearOpenRouterConversationRun(taskID: taskID, attemptID: attemptID)
+            return true
+        } catch {
+            let wasStopped = activeRuns[taskID]?.attemptID == attemptID
+                && activeRuns[taskID]?.phase == .stopping
+            if wasStopped || error is CancellationError {
+                if activeRuns[taskID]?.attemptID == attemptID {
+                    appendExecutionError(AgentExecutionError.cancelled, to: taskID)
+                }
+                clearOpenRouterConversationRun(taskID: taskID, attemptID: attemptID)
+                return true
+            }
+
+            clearOpenRouterConversationRun(taskID: taskID, attemptID: attemptID)
+            mutateTask(taskID) { task in
+                task.activity.insert(
+                    ActivityEvent(
+                        title: "Основной API недоступен",
+                        detail: "Быстрый маршрут не ответил; продолжаем по очереди Auto.",
+                        systemImage: "arrow.triangle.2.circlepath"
+                    ),
+                    at: 0
+                )
+            }
+            return false
+        }
+    }
+
+    private func clearOpenRouterConversationRun(
+        taskID: UUID,
+        attemptID: UUID
+    ) {
+        activeConversationResponseTasks[taskID] = nil
+        guard activeRuns[taskID]?.attemptID == attemptID else { return }
+        activeRuns[taskID] = nil
+        liveAgentOutputs[taskID] = nil
+    }
+
+    private func conversationConfiguration(
+        _ base: [String: String],
+        for agent: AgentKind
+    ) -> [String: String] {
+        var configuration = base
+        for (key, value) in profileGenerationConfiguration(for: agent) {
+            configuration[key] = value
+        }
+        return configuration
+    }
+
     private func profileGenerationConfiguration(
         for agent: AgentKind
     ) -> [String: String] {
@@ -1817,16 +2692,20 @@ final class AppStore {
     private func selectExecutionAgent(
         _ agent: AgentKind,
         for taskID: UUID,
-        snapshot: GitSnapshot
+        snapshot: GitSnapshot,
+        interactionMode: AgentInteractionMode
     ) {
         mutateTask(taskID) { task in
             guard task.currentAgent != agent else { return }
-            task.gitSnapshot = snapshot
+            if interactionMode == .workspace {
+                task.gitSnapshot = snapshot
+            }
             let previous = task.currentAgent
             Self.applyAgentSelection(
                 agent,
                 previous: previous,
                 requiresHandoff: previous != nil,
+                interactionMode: interactionMode,
                 to: &task
             )
         }
@@ -1841,24 +2720,43 @@ final class AppStore {
 
     private func recordAutomaticFailover(
         taskID: UUID,
-        from previousAgent: AgentKind,
-        to nextAgent: AgentKind,
+        from previousTarget: AgentExecutionTarget,
+        to nextTarget: AgentExecutionTarget,
         snapshot: GitSnapshot,
+        interactionMode: AgentInteractionMode,
         compressedHandoff: CompressedAgentHandoff?,
         compressionFailure: String?
     ) {
         mutateTask(taskID) { task in
-            task.gitSnapshot = snapshot
-            let issue = "\(previousAgent.shortName): лимит исчерпан."
+            let previousAgent = previousTarget.fallbackAgentKind
+            let nextAgent = nextTarget.fallbackAgentKind
+            let previousName = previousTarget.shortName
+            let nextName = nextTarget.shortName
+            let isConversation = interactionMode == .conversation
+            if !isConversation {
+                task.gitSnapshot = snapshot
+            }
+            let issue = "\(previousName): лимит исчерпан."
 
-            Self.applyAgentSelection(
-                nextAgent,
-                previous: previousAgent,
-                requiresHandoff: true,
-                to: &task
-            )
+            if case .cli = nextTarget {
+                Self.applyAgentSelection(
+                    nextAgent,
+                    previous: previousAgent,
+                    requiresHandoff: true,
+                    interactionMode: interactionMode,
+                    to: &task
+                )
+            }
 
-            if let compressedHandoff {
+            if isConversation, let compressedHandoff {
+                task.conversationHandoff = ConversationHandoff(
+                    facts: compressedHandoff.decisions,
+                    recentContext: compressedHandoff.progress,
+                    openThreads: compressedHandoff.knownIssues,
+                    nextReply: compressedHandoff.nextStep,
+                    updatedAt: .now
+                )
+            } else if let compressedHandoff {
                 if !compressedHandoff.decisions.isEmpty {
                     task.handoff.decisions = compressedHandoff.decisions
                 }
@@ -1868,25 +2766,33 @@ final class AppStore {
                 task.handoff.knownIssues = compressedHandoff.knownIssues
                 task.handoff.nextStep = compressedHandoff.nextStep
             }
-            task.handoff.knownIssues.removeAll { $0 == issue }
-            task.handoff.knownIssues = Array(
-                (task.handoff.knownIssues + [issue]).suffix(4)
-            )
-            task.handoff.updatedAt = .now
+            if !isConversation {
+                task.handoff.knownIssues.removeAll { $0 == issue }
+                task.handoff.knownIssues = Array(
+                    (task.handoff.knownIssues + [issue]).suffix(4)
+                )
+                task.handoff.updatedAt = .now
+            }
 
             var messages = task.messages ?? []
             let handoffDescription: String
-            if let compressedHandoff {
-                handoffDescription = "OpenRouter (\(compressedHandoff.modelID)) сжал контекст; Авто передал задачу \(nextAgent.shortName)."
+            if isConversation, let compressedHandoff {
+                handoffDescription = "API-модель \(compressedHandoff.modelID) сжала историю; Авто продолжил диалог через \(nextName)."
+            } else if isConversation, compressionFailure != nil {
+                handoffDescription = "API-handoff недоступен, поэтому Авто продолжил диалог через \(nextName) с локальным контекстом."
+            } else if isConversation {
+                handoffDescription = "Авто продолжил диалог через \(nextName)."
+            } else if let compressedHandoff {
+                handoffDescription = "API-модель \(compressedHandoff.modelID) сжала контекст; Авто передал задачу \(nextName)."
             } else if compressionFailure != nil {
-                handoffDescription = "OpenRouter недоступен, поэтому локальный handoff передал задачу \(nextAgent.shortName)."
+                handoffDescription = "API-handoff недоступен, поэтому локальный handoff передал задачу \(nextName)."
             } else {
-                handoffDescription = "Авто передал задачу \(nextAgent.shortName); новый агент сначала проверит текущий Git diff."
+                handoffDescription = "Авто передал задачу \(nextName); следующий исполнитель получил актуальный контекст."
             }
             messages.append(
                 TaskMessage(
                     role: .system,
-                    text: "Лимит \(previousAgent.shortName) исчерпан. \(handoffDescription)"
+                    text: "Лимит \(previousName) исчерпан. \(handoffDescription)"
                 )
             )
             task.messages = messages
@@ -1896,15 +2802,15 @@ final class AppStore {
                     title: compressedHandoff == nil
                         ? "Auto failover"
                         : "Бесшовный handoff",
-                    detail: {
-                        if let compressedHandoff {
-                            return "\(previousAgent.shortName) → \(nextAgent.shortName). Контекст сжал \(compressedHandoff.modelID)."
-                        }
-                        if let compressionFailure {
-                            return "\(previousAgent.shortName) → \(nextAgent.shortName). Локальный handoff: \(compressionFailure)"
-                        }
-                        return "\(previousAgent.shortName) → \(nextAgent.shortName) после подтверждённой ошибки лимита."
-                    }(),
+                        detail: {
+                            if let compressedHandoff {
+                                return "\(previousName) → \(nextName). Контекст сжала \(compressedHandoff.modelID)."
+                            }
+                            if let compressionFailure {
+                                return "\(previousName) → \(nextName). Локальный handoff: \(compressionFailure)"
+                            }
+                            return "\(previousName) → \(nextName) после подтверждённой ошибки лимита."
+                        }(),
                     systemImage: "arrow.triangle.2.circlepath"
                 ),
                 at: 0
@@ -1919,6 +2825,16 @@ final class AppStore {
         persist()
     }
 
+    private func mutateGroupChat(
+        _ id: UUID,
+        mutation: (inout AgentGroupChat) -> Void
+    ) {
+        guard let index = groupChats.firstIndex(where: { $0.id == id }) else { return }
+        mutation(&groupChats[index])
+        groupChats[index].updatedAt = .now
+        persist()
+    }
+
     private func persist() {
         guard persistenceAllowsWrites else {
             lastError = "Сохранение заблокировано: сначала восстановите или переместите повреждённый state.json."
@@ -1926,6 +2842,7 @@ final class AppStore {
         }
         do {
             try persistence.saveTasks(tasks)
+            try persistence.saveGroupChats(groupChats)
             lastError = nil
         } catch {
             lastError = error.localizedDescription
@@ -1936,6 +2853,96 @@ final class AppStore {
         Dictionary(uniqueKeysWithValues: parameterDefinitions(for: task).map { parameter in
             (parameter.id.rawValue, effectiveValue(for: parameter, in: task))
         })
+    }
+
+    private func execute(
+        target: AgentExecutionTarget,
+        attemptID: UUID,
+        taskID: UUID,
+        task: CodingTask,
+        repositoryPath: String,
+        prompt: String,
+        attachments: [TaskAttachment],
+        isGitRepository: Bool,
+        interactionMode: AgentInteractionMode
+    ) async throws -> String {
+        switch target {
+        case let .cli(agent):
+            guard let executablePath = agentInstallations
+                .first(where: { $0.kind == agent })?
+                .executablePath
+            else {
+                throw AgentExecutionError.executableUnavailable(agent)
+            }
+
+            var configuration = resolvedConfiguration(for: task)
+            if interactionMode == .conversation {
+                configuration = conversationConfiguration(configuration, for: agent)
+            }
+            let request = AgentExecutionRequest(
+                attemptID: attemptID,
+                taskID: taskID,
+                agent: agent,
+                executablePath: executablePath,
+                repositoryPath: repositoryPath,
+                prompt: prompt,
+                configuration: configuration,
+                attachments: attachments,
+                isGitRepository: isGitRepository
+            )
+            let response = try await taskOrchestrator.execute(request) { [weak self] output in
+                await self?.recordLiveAgentOutput(
+                    output,
+                    taskID: taskID,
+                    attemptID: attemptID
+                )
+            }
+            return response.text
+
+        case let .api(apiTarget):
+            let responseTask = Swift.Task { [apiExecutor] in
+                try await apiExecutor.execute(
+                    AIAPIExecutionRequest(
+                        target: apiTarget,
+                        prompt: prompt,
+                        maximumOutputTokens: interactionMode == .workspace ? 4_096 : 2_048
+                    )
+                )
+            }
+            activeAPIExecutionTasks[taskID] = responseTask
+            do {
+                let response = try await responseTask.value
+                activeAPIExecutionTasks[taskID] = nil
+                return response.text
+            } catch {
+                activeAPIExecutionTasks[taskID] = nil
+                throw error
+            }
+        }
+    }
+
+    private func resolvedGroupConfiguration(
+        for participant: CodingTask,
+        agent: AgentKind
+    ) -> [String: String] {
+        let capabilitySet = capabilities(for: agent)
+        let usesStoredValues = participant.currentAgent == agent
+        let selectedModelID = usesStoredValues
+            ? participant.agentConfiguration?[.model]
+            : nil
+        let definitions = capabilitySet.parameters(selectedModelID: selectedModelID)
+        let base = Dictionary(uniqueKeysWithValues: definitions.map { parameter in
+            let storedValue = usesStoredValues
+                ? participant.agentConfiguration?[parameter.id]
+                : nil
+            let value = storedValue.flatMap { candidate in
+                parameter.options.contains(where: { $0.id == candidate })
+                    ? candidate
+                    : nil
+            } ?? parameter.defaultValue
+            return (parameter.id.rawValue, value)
+        })
+        return conversationConfiguration(base, for: agent)
     }
 
     private func appendExecutionError(_ error: Error, to taskID: UUID) {
@@ -2078,8 +3085,10 @@ final class AppStore {
         excludingValidationTaskID: UUID?
     ) -> Bool {
         let target = canonicalRepositoryPath(repositoryPath)
-        let agentOwnsRepository = activeRuns.keys.contains { taskID in
-            tasks.first(where: { $0.id == taskID })
+        let agentOwnsRepository = activeRuns.contains { entry in
+            let (taskID, run) = entry
+            guard run.interactionMode == .workspace else { return false }
+            return tasks.first(where: { $0.id == taskID })
                 .map { canonicalRepositoryPath($0.repositoryPath) }
                 == target
         }
@@ -2122,16 +3131,30 @@ final class AppStore {
         }
     }
 
+    private static func configuration(
+        for profile: AgentProfileDraft
+    ) -> TaskAgentConfiguration {
+        var configuration = profile.configuration
+        configuration[.executionSource] = profile.executionSource.rawValue
+        configuration[.apiProvider] = profile.apiProvider.rawValue
+        let apiModelID = profile.apiModelID
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        configuration[.apiModel] = apiModelID.isEmpty ? nil : apiModelID
+        return configuration
+    }
+
     private static func applyAgentSelection(
         _ kind: AgentKind,
         previous: AgentKind?,
         requiresHandoff: Bool,
+        interactionMode: AgentInteractionMode? = nil,
         to task: inout CodingTask
     ) {
+        let isConversation = (interactionMode ?? task.effectiveInteractionMode) == .conversation
         task.currentAgent = kind
         task.agentConfiguration = nil
 
-        if requiresHandoff {
+        if requiresHandoff, !isConversation {
             appendCheckpoint(to: &task, reason: "Передача другому агенту")
             task.handoff.nextStep = "Сначала провести аудит текущего diff, затем продолжить незавершённый этап."
             task.handoff.updatedAt = .now
@@ -2140,9 +3163,17 @@ final class AppStore {
         task.activity.insert(
             ActivityEvent(
                 title: previous == nil ? "Агент выбран" : "Агент переключён",
-                detail: requiresHandoff
-                    ? "\(previous?.shortName ?? "Нет агента") → \(kind.shortName). Создан checkpoint и требуется аудит diff."
-                    : "Для задачи выбран \(kind.displayName).",
+                detail: {
+                    if requiresHandoff, isConversation {
+                        return "\(previous?.shortName ?? "Нет агента") → \(kind.shortName). Диалог продолжится с сохранённой историей."
+                    }
+                    if requiresHandoff {
+                        return "\(previous?.shortName ?? "Нет агента") → \(kind.shortName). Создан checkpoint и требуется аудит diff."
+                    }
+                    return isConversation
+                        ? "Для диалога выбран \(kind.displayName)."
+                        : "Для задачи выбран \(kind.displayName)."
+                }(),
                 systemImage: previous == nil ? "person.crop.circle.badge.checkmark" : "arrow.triangle.2.circlepath"
             ),
             at: 0

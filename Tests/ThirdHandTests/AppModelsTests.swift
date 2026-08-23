@@ -225,6 +225,58 @@ final class AppModelsTests: XCTestCase {
         XCTAssertTrue(seed.prompt.contains("сначала проверяй код"))
     }
 
+    func testAutomaticInteractionSeparatesCasualChatFromProjectWork() {
+        let friendPrompt = "Ты — Стеша, виртуальная подруга для душевных разговоров."
+        let developerPrompt = "Ты — Муни, спокойный разработчик и программист."
+
+        XCTAssertEqual(
+            AgentInteractionMode.automatic.resolved(
+                for: "Привет, как дела?",
+                personalityPrompt: friendPrompt
+            ),
+            .conversation
+        )
+        XCTAssertEqual(
+            AgentInteractionMode.automatic.resolved(
+                for: "Привет, исправь баг в SwiftUI-коде",
+                personalityPrompt: friendPrompt
+            ),
+            .workspace
+        )
+        XCTAssertEqual(
+            AgentInteractionMode.automatic.resolved(
+                for: "Давай поправим окно ввода",
+                personalityPrompt: developerPrompt
+            ),
+            .workspace
+        )
+        XCTAssertEqual(
+            AgentInteractionMode.automatic.resolved(
+                for: "Привет",
+                personalityPrompt: developerPrompt
+            ),
+            .conversation,
+            "Даже кодер не должен проверять Git в ответ на обычное приветствие"
+        )
+        XCTAssertEqual(
+            AgentInteractionMode.automatic.resolved(
+                for: "Объясни простыми словами, что такое замыкание",
+                personalityPrompt: developerPrompt
+            ),
+            .conversation,
+            "Объяснение темы не должно автоматически превращаться в работу над репозиторием"
+        )
+        XCTAssertEqual(
+            AgentInteractionMode.automatic.resolved(
+                for: "Тогда исправь это",
+                personalityPrompt: friendPrompt,
+                recentMessages: ["В SwiftUI-коде сломалась кнопка в репозитории"]
+            ),
+            .workspace,
+            "Короткая команда должна учитывать недавний проектный контекст"
+        )
+    }
+
     func testLegacyTaskDecodesWithoutRoutingAndLineStats() throws {
         var snapshot = GitSnapshot.unavailable
         snapshot.additions = 12

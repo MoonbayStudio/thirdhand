@@ -2,5 +2,6 @@
 .build/
 .swiftpm/
 dist/
+.idea/
 *.xcuserstate
 .codex/iCloud-conflict-backups/

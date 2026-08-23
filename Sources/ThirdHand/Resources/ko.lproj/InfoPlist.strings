@@ -1,0 +1,3 @@
+"CFBundleDisplayName" = "Third Hand";
+"NSMicrophoneUsageDescription" = "Third Hand은(는) 메시지를 받아쓰는 동안에만 마이크를 사용합니다.";
+"NSSpeechRecognitionUsageDescription" = "Third Hand은 받아쓰기된 메시지를 편집 가능한 텍스트로 변환합니다.";

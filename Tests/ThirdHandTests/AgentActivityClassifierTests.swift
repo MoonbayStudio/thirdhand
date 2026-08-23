@@ -3,6 +3,19 @@ import XCTest
 @testable import ThirdHand
 
 final class AgentActivityClassifierTests: XCTestCase {
+    func testConversationRunHidesDetailedActivityWhileProjectRunKeepsIt() {
+        let conversation = AgentRunState(
+            attemptID: UUID(),
+            agent: .codex,
+            interactionMode: .conversation,
+            phase: .running,
+            startedAt: .now
+        )
+
+        XCTAssertFalse(conversation.presentsDetailedActivity)
+        XCTAssertTrue(run(phase: .running).presentsDetailedActivity)
+    }
+
     func testPhaseOverridesOutputClassification() {
         let output = AgentLiveOutput(
             text: "apply_patch Sources/App.swift",
@@ -115,6 +128,7 @@ final class AgentActivityClassifierTests: XCTestCase {
         AgentRunState(
             attemptID: UUID(),
             agent: .codex,
+            interactionMode: .workspace,
             phase: phase,
             startedAt: .now
         )

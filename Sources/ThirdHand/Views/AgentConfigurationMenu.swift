@@ -8,6 +8,10 @@ struct AgentConfigurationMenu: View {
         store.effectiveAgent(for: task)
     }
 
+    private var selectedTarget: AgentExecutionTarget {
+        store.preferredExecutionTarget(for: task)
+    }
+
     private var isAutomatic: Bool {
         task.effectiveRoutingMode == .automatic
     }
@@ -17,7 +21,11 @@ struct AgentConfigurationMenu: View {
     }
 
     private var parameters: [AgentParameterDefinition] {
-        store.parameterDefinitions(for: task)
+        if task.effectiveRoutingMode == .manual,
+           task.configuredExecutionSource == .api {
+            return []
+        }
+        return store.parameterDefinitions(for: task)
     }
 
     private var selectedModelID: String? {
@@ -50,8 +58,8 @@ struct AgentConfigurationMenu: View {
             .disabled(task.agentConfiguration == nil)
         } label: {
             HStack(spacing: 6) {
-                Image(systemName: isFast ? "bolt.fill" : selectedAgent.systemImage)
-                    .foregroundStyle(selectedAgent.tint)
+                Image(systemName: isFast ? "bolt.fill" : selectedTarget.systemImage)
+                    .foregroundStyle(selectedTarget.tint)
 
                 Text(summary)
                     .lineLimit(1)
@@ -77,8 +85,8 @@ struct AgentConfigurationMenu: View {
         .buttonStyle(.plain)
         .menuIndicator(.hidden)
         .fixedSize(horizontal: true, vertical: false)
-        .help("Агент и параметры запуска")
-        .accessibilityLabel("Параметры агента: \(summary)")
+        .help(AppLocalization.string("Агент и параметры запуска"))
+        .accessibilityLabel(AppLocalization.string("Параметры агента: \(summary)"))
     }
 
     private var agentMenu: some View {
@@ -109,14 +117,43 @@ struct AgentConfigurationMenu: View {
                 }
                 .disabled(!installation.isAvailable)
             }
+
+            Divider()
+
+            Menu {
+                ForEach(AIAPIProvider.allCases) { provider in
+                    let modelID = AIAPIPreferences.primaryModelID(for: provider)
+                    Button {
+                        store.selectAPI(
+                            AIAPITarget(provider: provider, modelID: modelID),
+                            for: task.id
+                        )
+                    } label: {
+                        if case let .api(target) = selectedTarget,
+                           target.provider == provider,
+                           !isAutomatic {
+                            Label("\(provider.displayName) · \(modelID)", systemImage: "checkmark")
+                        } else {
+                            Text(
+                                modelID.isEmpty
+                                    ? "\(provider.displayName) — модель не выбрана"
+                                    : "\(provider.displayName) · \(modelID)"
+                            )
+                        }
+                    }
+                    .disabled(modelID.isEmpty)
+                }
+            } label: {
+                Label("API", systemImage: "key.horizontal")
+            }
         } label: {
             Label(
                 isAutomatic
-                    ? "Режим — Авто → \(selectedAgent.shortName)"
-                    : "Агент — \(selectedAgent.shortName)",
+                    ? "Режим — Авто → \(selectedTarget.shortName)"
+                    : "Запуск — \(selectedTarget.shortName)",
                 systemImage: isAutomatic
                     ? "arrow.triangle.2.circlepath"
-                    : selectedAgent.systemImage
+                    : selectedTarget.systemImage
             )
         }
     }
@@ -146,7 +183,12 @@ struct AgentConfigurationMenu: View {
     }
 
     private var summary: String {
-        let modelTitle = capabilities.model(for: selectedModelID)?.compactTitle ?? "Модель"
+        if case let .api(target) = selectedTarget, !isAutomatic {
+            return ["API", target.provider.shortName, target.modelID]
+                .joined(separator: " · ")
+        }
+        let modelTitle = capabilities.model(for: selectedModelID)?.compactTitle
+            ?? AppLocalization.string("Модель")
 
         let secondaryParameter = parameters.first {
             $0.id == .reasoningEffort || $0.id == .executionMode
@@ -156,7 +198,12 @@ struct AgentConfigurationMenu: View {
             return parameter.options.first(where: { $0.id == selectedValue })?.title
         }
 
-        return [isAutomatic ? "Авто" : nil, selectedAgent.shortName, modelTitle, secondaryTitle]
+        return [
+            isAutomatic ? AppLocalization.string("Авто") : nil,
+            selectedAgent.shortName,
+            modelTitle,
+            secondaryTitle
+        ]
             .compactMap { $0 }
             .joined(separator: " · ")
     }

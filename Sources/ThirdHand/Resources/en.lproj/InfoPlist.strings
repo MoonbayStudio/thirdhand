@@ -1,0 +1,3 @@
+"CFBundleDisplayName" = "Third Hand";
+"NSMicrophoneUsageDescription" = "Third Hand uses the microphone only while you dictate a message.";
+"NSSpeechRecognitionUsageDescription" = "Third Hand turns your dictated message into editable text.";

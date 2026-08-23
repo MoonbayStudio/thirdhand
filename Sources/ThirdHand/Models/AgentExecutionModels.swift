@@ -8,10 +8,10 @@ enum AgentRunPhase: String, Hashable, Sendable {
 
     var title: String {
         switch self {
-        case .preparing: "Подготовка контекста"
-        case .compressingContext: "Сжатие контекста"
-        case .running: "Агент работает"
-        case .stopping: "Остановка"
+        case .preparing: AppLocalization.string("Подготовка контекста")
+        case .compressingContext: AppLocalization.string("Сжатие контекста")
+        case .running: AppLocalization.string("Агент работает")
+        case .stopping: AppLocalization.string("Остановка")
         }
     }
 }
@@ -19,8 +19,30 @@ enum AgentRunPhase: String, Hashable, Sendable {
 struct AgentRunState: Hashable, Sendable {
     let attemptID: UUID
     let agent: AgentKind
+    let executionTarget: AgentExecutionTarget
+    let interactionMode: AgentInteractionMode
     var phase: AgentRunPhase
     let startedAt: Date
+
+    init(
+        attemptID: UUID,
+        agent: AgentKind,
+        executionTarget: AgentExecutionTarget? = nil,
+        interactionMode: AgentInteractionMode,
+        phase: AgentRunPhase,
+        startedAt: Date
+    ) {
+        self.attemptID = attemptID
+        self.agent = agent
+        self.executionTarget = executionTarget ?? .cli(agent)
+        self.interactionMode = interactionMode
+        self.phase = phase
+        self.startedAt = startedAt
+    }
+
+    var presentsDetailedActivity: Bool {
+        interactionMode == .workspace
+    }
 }
 
 struct RepositoryHandoffContext: Hashable, Sendable {

@@ -1,0 +1,3 @@
+"CFBundleDisplayName" = "Third Hand";
+"NSMicrophoneUsageDescription" = "Third Hand mikrofondan faqat xabarni ovozli kiritish paytida foydalanadi.";
+"NSSpeechRecognitionUsageDescription" = "Third Hand diktatsiya qilingan xabarni tahrirlanadigan matnga aylantiradi.";
