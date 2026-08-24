@@ -32,14 +32,6 @@ enum AgentCLIInvocationFactory {
             if let approvalPolicy = request.configuration[AgentOptionID.approvalPolicy.rawValue] {
                 arguments += ["--ask-for-approval", approvalPolicy]
             }
-
-            arguments += [
-                "exec",
-                "--color", "never",
-                "--cd", request.repositoryPath,
-                "--output-last-message", responseFileURL.path
-            ]
-
             if let model = request.configuration[AgentOptionID.model.rawValue] {
                 arguments += ["--model", model]
             }
@@ -55,15 +47,45 @@ enum AgentCLIInvocationFactory {
                     "--config", tomlOverride(key: "service_tier", value: "fast")
                 ]
             }
-            if !request.isGitRepository {
-                arguments.append("--skip-git-repo-check")
-            }
+
+            arguments += ["--cd", request.repositoryPath]
 
             for directory in attachmentDirectories {
                 arguments += ["--add-dir", directory]
             }
             for attachment in request.attachments where isImage(attachment) {
                 arguments += ["--image", attachment.filePath]
+            }
+
+            arguments.append("exec")
+            var resumedSessionID: String?
+            switch request.nativeSession {
+            case .disabled:
+                arguments += [
+                    "--ephemeral",
+                    "--color", "never",
+                    "--json",
+                    "--output-last-message", responseFileURL.path
+                ]
+            case .start:
+                arguments += [
+                    "--color", "never",
+                    "--json",
+                    "--output-last-message", responseFileURL.path
+                ]
+            case let .resume(sessionID):
+                arguments += [
+                    "resume",
+                    "--json",
+                    "--output-last-message", responseFileURL.path
+                ]
+                resumedSessionID = sessionID
+            }
+            if !request.isGitRepository {
+                arguments.append("--skip-git-repo-check")
+            }
+            if let resumedSessionID {
+                arguments.append(resumedSessionID)
             }
             arguments.append(request.prompt)
 
@@ -76,9 +98,19 @@ enum AgentCLIInvocationFactory {
             var arguments = [
                 "--print",
                 "--input-format", "text",
-                "--output-format", "json",
-                "--no-session-persistence"
+                "--output-format", "json"
             ]
+
+            switch request.nativeSession {
+            case .disabled:
+                arguments.append("--no-session-persistence")
+            case let .start(preferredID):
+                if let preferredID {
+                    arguments += ["--session-id", preferredID]
+                }
+            case let .resume(sessionID):
+                arguments += ["--resume", sessionID]
+            }
 
             if let model = request.configuration[AgentOptionID.model.rawValue], model != "default" {
                 arguments += ["--model", model]
@@ -118,6 +150,20 @@ enum AgentCLIInvocationFactory {
 
             return PreparedAgentInvocation(
                 invocation: invocation(request: request, arguments: arguments, environment: environment),
+                responseFileURL: nil
+            )
+
+        case .deepSeek:
+            environment["DSH_PERMISSION_MODE"] =
+                request.configuration[AgentOptionID.sandboxMode.rawValue]
+                ?? "workspace-write"
+
+            return PreparedAgentInvocation(
+                invocation: invocation(
+                    request: request,
+                    arguments: ["--profile", "headless", request.prompt],
+                    environment: environment
+                ),
                 responseFileURL: nil
             )
         }

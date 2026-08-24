@@ -2,6 +2,7 @@ import SwiftUI
 
 struct SidebarView: View {
     @Environment(AppStore.self) private var store
+    @State private var isShowingCreatePopover = false
 
     var body: some View {
         @Bindable var store = store
@@ -111,31 +112,44 @@ struct SidebarView: View {
     private var sidebarFooter: some View {
         VStack(spacing: 0) {
             HStack(spacing: 9) {
-                Menu {
-                    Button {
-                        store.beginAgentCreation()
-                    } label: {
-                        Label("Создать агента", systemImage: "person.crop.circle.badge.plus")
-                    }
-
-                    Button {
-                        store.isShowingNewGroupChatSheet = true
-                    } label: {
-                        Label("Создать групповой чат…", systemImage: "person.3.fill")
-                    }
+                Button {
+                    isShowingCreatePopover = true
                 } label: {
                     Label("Создать", systemImage: "plus")
                         .font(.callout.weight(.semibold))
                         .foregroundStyle(.white)
                         .lineLimit(1)
-                        .minimumScaleFactor(0.82)
-                        .padding(.vertical, 9)
-                        .padding(.horizontal, 12)
+                        .frame(width: 96, height: 30)
                         .background(Color.accentColor, in: Capsule())
                         .contentShape(Capsule())
                 }
-                .menuStyle(.borderlessButton)
-                .menuIndicator(.hidden)
+                .buttonStyle(SidebarCreateButtonStyle())
+                .popover(
+                    isPresented: $isShowingCreatePopover,
+                    attachmentAnchor: .rect(.bounds),
+                    arrowEdge: .bottom
+                ) {
+                    VStack(spacing: 2) {
+                        SidebarCreateActionButton(
+                            title: "Создать агента",
+                            systemImage: "person.crop.circle.badge.plus"
+                        ) {
+                            isShowingCreatePopover = false
+                            store.beginAgentCreation()
+                        }
+
+                        SidebarCreateActionButton(
+                            title: "Создать групповой чат…",
+                            systemImage: "person.3.fill"
+                        ) {
+                            isShowingCreatePopover = false
+                            store.isShowingNewGroupChatSheet = true
+                        }
+                    }
+                    .padding(6)
+                    .frame(width: 232)
+                }
+                .accessibilityLabel("Создать")
                 .accessibilityIdentifier("create-conversation-menu")
 
                 Spacer(minLength: 12)
@@ -156,6 +170,40 @@ struct SidebarView: View {
             .padding(.horizontal, 12)
             .padding(.vertical, 11)
         }
+    }
+}
+
+private struct SidebarCreateButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .opacity(configuration.isPressed ? 0.82 : 1)
+            .scaleEffect(configuration.isPressed ? 0.98 : 1)
+            .animation(.easeOut(duration: 0.1), value: configuration.isPressed)
+    }
+}
+
+private struct SidebarCreateActionButton: View {
+    let title: String
+    let systemImage: String
+    let action: () -> Void
+
+    @State private var isHovered = false
+
+    var body: some View {
+        Button(action: action) {
+            Label(title, systemImage: systemImage)
+                .font(.callout)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 8)
+                .background(
+                    isHovered ? Color.accentColor.opacity(0.16) : Color.clear,
+                    in: RoundedRectangle(cornerRadius: 7, style: .continuous)
+                )
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { isHovered = $0 }
     }
 }
 

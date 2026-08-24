@@ -4,7 +4,7 @@ enum AgentRoutingPreferences {
     static let automaticOrderKey = "automaticAgentOrder"
 
     static var defaultOrder: [AgentKind] {
-        [.codex, .claudeCode, .antigravity]
+        [.codex, .claudeCode, .antigravity, .deepSeek]
     }
 
     static func load(from defaults: UserDefaults = .standard) -> [AgentKind] {

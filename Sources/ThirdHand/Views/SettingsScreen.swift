@@ -75,7 +75,7 @@ enum SettingsSection: String, CaseIterable, Hashable, Identifiable {
         case .privacy:
             "приватность terminal logs логи секреты privacy"
         case .api:
-            "api апи ключ openrouter openai anthropic claude gemini авто handoff модели провайдеры лимиты"
+            "api апи ключ openrouter deepseek dsh openai anthropic claude gemini авто handoff модели провайдеры лимиты"
         }
     }
 

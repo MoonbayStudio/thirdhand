@@ -62,6 +62,9 @@ struct AIAPIClient: Sendable {
             models = envelope.data.map {
                 AIAPIModelOption(id: $0.id, name: $0.name, contextLength: $0.contextLength)
             }
+        case .deepSeek:
+            let envelope = try JSONDecoder().decode(OpenAIModelsEnvelope.self, from: data)
+            models = envelope.data.map { AIAPIModelOption(id: $0.id) }
         case .openAI:
             let envelope = try JSONDecoder().decode(OpenAIModelsEnvelope.self, from: data)
             models = envelope.data
@@ -118,7 +121,7 @@ struct AIAPIClient: Sendable {
         let text: String?
 
         switch provider {
-        case .openRouter:
+        case .openRouter, .deepSeek:
             text = try JSONDecoder().decode(ChatCompletionEnvelope.self, from: data)
                 .choices.first?.message.content
         case .openAI:
@@ -149,6 +152,8 @@ struct AIAPIClient: Sendable {
         switch provider {
         case .openRouter:
             url = URL(string: "https://openrouter.ai/api/v1/models")!
+        case .deepSeek:
+            url = URL(string: "https://api.deepseek.com/models")!
         case .openAI:
             url = URL(string: "https://api.openai.com/v1/models")!
         case .anthropic:
@@ -175,6 +180,8 @@ struct AIAPIClient: Sendable {
         switch target.provider {
         case .openRouter:
             url = URL(string: "https://openrouter.ai/api/v1/chat/completions")!
+        case .deepSeek:
+            url = URL(string: "https://api.deepseek.com/chat/completions")!
         case .openAI:
             url = URL(string: "https://api.openai.com/v1/responses")!
         case .anthropic:
@@ -193,7 +200,7 @@ struct AIAPIClient: Sendable {
         applyAuthorization(provider: target.provider, apiKey: key, to: &request)
 
         switch target.provider {
-        case .openRouter:
+        case .openRouter, .deepSeek:
             var messages: [[String: String]] = []
             if let systemPrompt, !systemPrompt.isEmpty {
                 messages.append(["role": "system", "content": systemPrompt])
@@ -247,6 +254,8 @@ struct AIAPIClient: Sendable {
         case .openRouter:
             request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
             request.setValue("Third Hand", forHTTPHeaderField: "X-Title")
+        case .deepSeek:
+            request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
         case .openAI:
             request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
         case .anthropic:

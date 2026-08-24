@@ -41,7 +41,7 @@ struct AgentRunState: Hashable, Sendable {
     }
 
     var presentsDetailedActivity: Bool {
-        interactionMode == .workspace
+        interactionMode == .workspace || phase == .compressingContext
     }
 }
 
@@ -50,6 +50,12 @@ struct RepositoryHandoffContext: Hashable, Sendable {
     let diff: String
     let diffStat: String
     let isGitRepository: Bool
+}
+
+enum AgentNativeSessionDirective: Hashable, Sendable {
+    case disabled
+    case start(preferredID: String? = nil)
+    case resume(id: String)
 }
 
 struct AgentExecutionRequest: Sendable {
@@ -62,11 +68,43 @@ struct AgentExecutionRequest: Sendable {
     let configuration: [String: String]
     let attachments: [TaskAttachment]
     let isGitRepository: Bool
+    let nativeSession: AgentNativeSessionDirective
+
+    init(
+        attemptID: UUID,
+        taskID: UUID,
+        agent: AgentKind,
+        executablePath: String,
+        repositoryPath: String,
+        prompt: String,
+        configuration: [String: String],
+        attachments: [TaskAttachment],
+        isGitRepository: Bool,
+        nativeSession: AgentNativeSessionDirective = .disabled
+    ) {
+        self.attemptID = attemptID
+        self.taskID = taskID
+        self.agent = agent
+        self.executablePath = executablePath
+        self.repositoryPath = repositoryPath
+        self.prompt = prompt
+        self.configuration = configuration
+        self.attachments = attachments
+        self.isGitRepository = isGitRepository
+        self.nativeSession = nativeSession
+    }
 }
 
 struct AgentExecutionResponse: Sendable {
     let text: String
     let exitCode: Int32
+    let nativeSessionID: String?
+
+    init(text: String, exitCode: Int32, nativeSessionID: String? = nil) {
+        self.text = text
+        self.exitCode = exitCode
+        self.nativeSessionID = nativeSessionID
+    }
 }
 
 struct AgentLiveOutput: Hashable, Sendable {
@@ -126,6 +164,8 @@ enum AgentFailureClassifier {
             "quota exceeded",
             "quota_exceeded",
             "insufficient_quota",
+            "insufficient balance",
+            "insufficient_balance",
             "you've hit your limit",
             "you have hit your limit",
             "limit reached for your account",

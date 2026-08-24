@@ -21,6 +21,10 @@ struct AgentCapabilityDetector: Sendable {
                     if let models = Self.loadAntigravityModels(executablePath: executablePath), !models.isEmpty {
                         catalog[.antigravity] = AgentCapabilitySet(kind: .antigravity, models: models)
                     }
+
+                case .deepSeek:
+                    // The headless profile owns its model selection in DSH settings.
+                    break
                 }
             }
 

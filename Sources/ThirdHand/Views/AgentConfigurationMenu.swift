@@ -187,8 +187,10 @@ struct AgentConfigurationMenu: View {
             return ["API", target.provider.shortName, target.modelID]
                 .joined(separator: " · ")
         }
-        let modelTitle = capabilities.model(for: selectedModelID)?.compactTitle
-            ?? AppLocalization.string("Модель")
+        let modelTitle = capabilities.models.isEmpty
+            ? nil
+            : capabilities.model(for: selectedModelID)?.compactTitle
+                ?? AppLocalization.string("Модель")
 
         let secondaryParameter = parameters.first {
             $0.id == .reasoningEffort || $0.id == .executionMode

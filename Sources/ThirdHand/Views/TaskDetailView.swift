@@ -12,6 +12,13 @@ struct TaskDetailView: View {
     @State private var isCurrentLiveOutputRevealed = false
     @State private var voiceInput = VoiceInputController()
     @State private var dictationBaseDraft = ""
+    @State private var selectedSlashCommandID: String?
+    @State private var isShowingSlashCommandHelp = false
+    @State private var slashCommandHelpGeneration = 0
+    @State private var helpCommandTokenID: UUID?
+    @State private var commandOptionTokenID: UUID?
+    @State private var composerTokens: [InlineComposerToken] = []
+    @State private var composerCardHeight: CGFloat = 0
     @AppStorage("showRawTerminalLogs") private var showRawTerminalLogs = false
     @AppStorage(AppPreferenceKeys.voiceInputEnabled)
     private var voiceInputEnabled = true
@@ -28,6 +35,7 @@ struct TaskDetailView: View {
     private var canSend: Bool {
         !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             || !draftAttachments.isEmpty
+            || !composerTokens.isEmpty
     }
 
     private var canSubmit: Bool {
@@ -62,14 +70,108 @@ struct TaskDetailView: View {
         "onboarding-typing-\(task.onboardingStage?.rawValue ?? "none")"
     }
 
+    private var autocompletedSlashCommand: ChatSlashCommandDescriptor? {
+        guard composerTokens.count == 1,
+              let commandToken = composerTokens.first,
+              commandToken.utf16Offset == 0
+        else {
+            return nil
+        }
+        return ChatSlashCommandDescriptor.all.first {
+            $0.name == commandToken.text
+        }
+    }
+
+    private var slashCommandSuggestions: [ChatSlashCommandDescriptor] {
+        guard activeRun == nil,
+              task.onboardingStage == nil,
+              draftAttachments.isEmpty
+        else {
+            return []
+        }
+        return ChatSlashCommandDescriptor.suggestions(for: draft)
+    }
+
+    private var presentedSlashCommands: [ChatSlashCommandDescriptor] {
+        isShowingSlashCommandHelp
+            ? ChatSlashCommandDescriptor.all
+            : slashCommandSuggestions
+    }
+
+    private var presentedSlashCommandOptions: [ChatSlashCommandOption] {
+        guard let commandOptionTokenID,
+              composerTokens.count == 1,
+              composerTokens.first?.id == commandOptionTokenID,
+              let command = autocompletedSlashCommand
+        else {
+            return []
+        }
+        return slashCommandOptions(for: command)
+    }
+
+    private var slashPaletteItems: [SlashCommandPaletteItem] {
+        if !presentedSlashCommandOptions.isEmpty {
+            return presentedSlashCommandOptions.map(
+                SlashCommandPaletteItem.init(option:)
+            )
+        }
+        return presentedSlashCommands.map(
+            SlashCommandPaletteItem.init(command:)
+        )
+    }
+
+    private var slashPaletteIdentity: String {
+        if let commandOptionTokenID {
+            return "options-\(commandOptionTokenID)-\(slashCommandHelpGeneration)"
+        }
+        if isShowingSlashCommandHelp {
+            return "help-\(slashCommandHelpGeneration)"
+        }
+        return "suggestions"
+    }
+
+    private var slashPaletteAnimation: Animation? {
+        accessibilityOptions.reduceMotion
+            ? nil
+            : .spring(response: 0.27, dampingFraction: 0.9)
+    }
+
     var body: some View {
-        TransparentVSplitView(
-            top: messageList.environment(store),
-            bottom: composer.environment(store),
-            minimumTopHeight: 240,
-            minimumBottomHeight: 120,
-            idealBottomHeight: 160,
-            maximumBottomHeight: 360
+        ZStack(alignment: .bottom) {
+            TransparentVSplitView(
+                top: messageList.environment(store),
+                bottom: composer.environment(store),
+                minimumTopHeight: 240,
+                minimumBottomHeight: 120,
+                idealBottomHeight: 160,
+                maximumBottomHeight: 360
+            )
+
+            if !slashPaletteItems.isEmpty, composerCardHeight > 0 {
+                SlashCommandPalette(
+                    items: slashPaletteItems,
+                    selectedID: selectedSlashCommandID,
+                    onSelect: activateSlashPaletteItem,
+                    onHighlight: { selectedSlashCommandID = $0 }
+                )
+                .id(slashPaletteIdentity)
+                .padding(.horizontal, 24)
+                .frame(maxWidth: 820)
+                .padding(.bottom, composerCardHeight + 21)
+                .transition(.asymmetric(
+                    insertion: .offset(y: 5).combined(with: .opacity),
+                    removal: .offset(y: 5).combined(with: .opacity)
+                ))
+                .zIndex(10)
+            }
+        }
+        .animation(
+            slashPaletteAnimation,
+            value: slashPaletteItems.map(\.id)
+        )
+        .animation(
+            slashPaletteAnimation,
+            value: isShowingSlashCommandHelp
         )
         .navigationTitle("")
         .toolbar {
@@ -109,6 +211,12 @@ struct TaskDetailView: View {
         }
         .onChange(of: task.id) {
             isCurrentLiveOutputRevealed = false
+            selectedSlashCommandID = nil
+            isShowingSlashCommandHelp = false
+            slashCommandHelpGeneration += 1
+            helpCommandTokenID = nil
+            commandOptionTokenID = nil
+            composerTokens = []
             voiceInput.cancel()
             voiceInput.clearTranscript()
             dictationBaseDraft = ""
@@ -125,6 +233,12 @@ struct TaskDetailView: View {
             guard !transcript.isEmpty else { return }
             draft = composedDraft(base: dictationBaseDraft, transcript: transcript)
         }
+        .onChange(of: draft) {
+            let suggestions = slashPaletteItems
+            if !suggestions.contains(where: { $0.id == selectedSlashCommandID }) {
+                selectedSlashCommandID = suggestions.first?.id
+            }
+        }
         .onChange(of: voiceInput.errorMessage) { _, message in
             guard let message else { return }
             store.lastError = message
@@ -135,6 +249,7 @@ struct TaskDetailView: View {
             }
         }
         .onDisappear {
+            slashCommandHelpGeneration += 1
             voiceInput.cancel()
         }
         .fileImporter(
@@ -309,16 +424,24 @@ struct TaskDetailView: View {
                     .foregroundStyle(.secondary)
                 }
 
-                TextField(
-                    composerPlaceholder,
+                InlineTokenComposerField(
                     text: $draft,
-                    axis: .vertical
+                    tokens: $composerTokens,
+                    placeholder: autocompletedSlashCommand == nil
+                        ? composerPlaceholder
+                        : commandArgumentPlaceholder,
+                    isEnabled: !isComposerBlocked,
+                    isFocused: isComposerFocused,
+                    onFocusChange: { isComposerFocused = $0 },
+                    onRecognizeCommand: autocompleteSlashCommand,
+                    onSubmit: submitComposer,
+                    onMoveSuggestion: moveSlashSelection,
+                    onActivateToken: activateComposerToken,
+                    onDismissCommandPalette: dismissSlashCommandPalette
                 )
-                .textFieldStyle(.plain)
-                .lineLimit(1...7)
-                .focused($isComposerFocused)
-                .disabled(isComposerBlocked)
-                .onSubmit(send)
+                .frame(maxWidth: .infinity)
+                .frame(minHeight: 24)
+                .animation(slashPaletteAnimation, value: autocompletedSlashCommand?.id)
 
                 HStack(alignment: .center, spacing: 8) {
                     Button {
@@ -330,7 +453,11 @@ struct TaskDetailView: View {
                             .background(.quaternary, in: Circle())
                     }
                     .buttonStyle(.plain)
-                    .disabled(isComposerBlocked || task.onboardingStage != nil)
+                    .disabled(
+                        isComposerBlocked
+                            || task.onboardingStage != nil
+                            || !composerTokens.isEmpty
+                    )
                     .help("Добавить файлы")
 
                     if voiceInputEnabled {
@@ -392,12 +519,21 @@ struct TaskDetailView: View {
                         .buttonStyle(.plain)
                         .help("Остановить агента")
                     } else {
-                        Button(action: send) {
-                            Image(systemName: "arrow.up")
-                                .font(.system(size: 13, weight: .bold))
-                                .foregroundStyle(canSubmit ? Color.white : Color.secondary)
-                                .frame(width: 28, height: 28)
-                                .background(canSubmit ? Color.accentColor : Color.secondary.opacity(0.12), in: Circle())
+                        Button(action: sendComposer) {
+                            ZStack {
+                                Circle()
+                                    .fill(
+                                        canSubmit
+                                            ? Color.accentColor
+                                            : Color.secondary.opacity(0.12)
+                                    )
+
+                                Image(systemName: "arrow.up")
+                                    .font(.system(size: 13, weight: .bold))
+                                    .foregroundStyle(canSubmit ? Color.white : Color.secondary)
+                                    .offset(y: 0.75)
+                            }
+                            .frame(width: 28, height: 28)
                         }
                         .buttonStyle(.plain)
                         .disabled(!canSubmit)
@@ -418,6 +554,17 @@ struct TaskDetailView: View {
                     .strokeBorder(Color(nsColor: .separatorColor).opacity(0.42), lineWidth: 0.5)
             }
             .shadow(color: .black.opacity(0.06), radius: 12, y: 5)
+            .background {
+                GeometryReader { proxy in
+                    Color.clear.preference(
+                        key: TaskComposerCardHeightPreferenceKey.self,
+                        value: proxy.size.height
+                    )
+                }
+            }
+            .onPreferenceChange(TaskComposerCardHeightPreferenceKey.self) { height in
+                composerCardHeight = height
+            }
         }
         .padding(.horizontal, 24)
         .padding(.top, activeRun == nil ? 14 : 10)
@@ -427,8 +574,316 @@ struct TaskDetailView: View {
         .frame(maxHeight: .infinity, alignment: .bottom)
     }
 
+    private func submitComposer() {
+        if let option = selectedSlashCommandOption() {
+            activateSlashCommandOption(option)
+            return
+        }
+
+        if let command = selectedSlashCommand() {
+            activateSlashCommand(command)
+            return
+        }
+
+        sendComposer()
+    }
+
+    private func sendComposer() {
+        if draftAttachments.isEmpty,
+           (try? ChatSlashCommandParser.parse(resolvedComposerText)) == .help {
+            presentSlashCommandHelp()
+            return
+        }
+
+        send()
+    }
+
+    private func selectedSlashCommand() -> ChatSlashCommandDescriptor? {
+        guard presentedSlashCommandOptions.isEmpty else { return nil }
+        return presentedSlashCommands.first { $0.id == selectedSlashCommandID }
+            ?? presentedSlashCommands.first
+    }
+
+    private func selectedSlashCommandOption() -> ChatSlashCommandOption? {
+        presentedSlashCommandOptions.first { $0.id == selectedSlashCommandID }
+            ?? presentedSlashCommandOptions.first
+    }
+
+    private func moveSlashSelection(by offset: Int) -> Bool {
+        let suggestions = slashPaletteItems
+        guard !suggestions.isEmpty else { return false }
+        let currentIndex = selectedSlashCommandID.flatMap { selectedID in
+            suggestions.firstIndex(where: { $0.id == selectedID })
+        } ?? 0
+        let nextIndex = (currentIndex + offset + suggestions.count) % suggestions.count
+        selectedSlashCommandID = suggestions[nextIndex].id
+        return true
+    }
+
+    private func activateSlashPaletteItem(_ itemID: String) {
+        if let option = presentedSlashCommandOptions.first(
+            where: { $0.id == itemID }
+        ) {
+            activateSlashCommandOption(option)
+            return
+        }
+
+        guard let command = presentedSlashCommands.first(
+            where: { $0.id == itemID }
+        ) else {
+            return
+        }
+        activateSlashCommand(command)
+    }
+
+    private func autocompleteSlashCommand(
+        _ command: ChatSlashCommandDescriptor,
+        replacing replacementRange: NSRange? = nil
+    ) -> UUID {
+        slashCommandHelpGeneration += 1
+        voiceInput.stop()
+        voiceInput.clearTranscript()
+        dictationBaseDraft = ""
+        let range = replacementRange
+            ?? ChatSlashCommandDescriptor.activeFragment(in: draft)?.range
+            ?? NSRange(location: (draft as NSString).length, length: 0)
+        let insertion = InlineComposerContent.insertingToken(
+            text: command.name,
+            replacing: range,
+            in: draft,
+            tokens: composerTokens
+        )
+        composerTokens = insertion.tokens
+        draft = insertion.text
+        selectedSlashCommandID = nil
+        isComposerFocused = true
+
+        if command.name == "/help" {
+            presentSlashCommandHelp(for: insertion.tokenID)
+        } else if command.argumentKind != .none {
+            presentSlashCommandOptions(
+                for: insertion.tokenID,
+                command: command
+            )
+        } else {
+            dismissSlashCommandPalette()
+        }
+        return insertion.tokenID
+    }
+
+    private func activateSlashCommand(_ command: ChatSlashCommandDescriptor) {
+        guard activeRun == nil, !isRepositoryBusy else { return }
+
+        if isShowingSlashCommandHelp,
+           let helpCommandTokenID {
+            replaceHelpCommandToken(
+                helpCommandTokenID,
+                with: command
+            )
+            return
+        }
+
+        _ = autocompleteSlashCommand(command)
+    }
+
+    private func presentSlashCommandHelp() {
+        guard activeRun == nil, task.onboardingStage == nil else { return }
+
+        if let token = composerTokens.first(where: { $0.text == "/help" }) {
+            presentSlashCommandHelp(for: token.id)
+            return
+        }
+
+        guard let helpCommand = ChatSlashCommandDescriptor.all.first(
+            where: { $0.name == "/help" }
+        ) else {
+            return
+        }
+        _ = autocompleteSlashCommand(helpCommand)
+    }
+
+    private func presentSlashCommandHelp(for tokenID: UUID) {
+        guard activeRun == nil,
+              task.onboardingStage == nil,
+              composerTokens.contains(where: {
+                  $0.id == tokenID && $0.text == "/help"
+              })
+        else {
+            return
+        }
+
+        slashCommandHelpGeneration += 1
+        helpCommandTokenID = tokenID
+        commandOptionTokenID = nil
+        selectedSlashCommandID = ChatSlashCommandDescriptor.all.first?.id
+        withAnimation(slashPaletteAnimation) {
+            isShowingSlashCommandHelp = true
+        }
+        isComposerFocused = true
+    }
+
+    private func presentSlashCommandOptions(
+        for tokenID: UUID,
+        command: ChatSlashCommandDescriptor
+    ) {
+        guard activeRun == nil,
+              task.onboardingStage == nil,
+              composerTokens.count == 1,
+              composerTokens.first?.id == tokenID,
+              composerTokens.first?.text == command.name
+        else {
+            dismissSlashCommandPalette()
+            return
+        }
+
+        let options = slashCommandOptions(for: command)
+        guard !options.isEmpty else {
+            dismissSlashCommandPalette()
+            return
+        }
+
+        slashCommandHelpGeneration += 1
+        helpCommandTokenID = nil
+        withAnimation(slashPaletteAnimation) {
+            isShowingSlashCommandHelp = false
+            commandOptionTokenID = tokenID
+            selectedSlashCommandID = options.first(where: \.isCurrent)?.id
+                ?? options.first?.id
+        }
+        isComposerFocused = true
+    }
+
+    private func slashCommandOptions(
+        for command: ChatSlashCommandDescriptor
+    ) -> [ChatSlashCommandOption] {
+        switch command.argumentKind {
+        case .none:
+            return []
+
+        case .model:
+            switch store.preferredExecutionTarget(for: task) {
+            case let .cli(agent):
+                let capabilities = store.capabilities(for: agent)
+                let models = capabilities.models.map { model in
+                    AgentValueOption(
+                        model.id,
+                        title: model.title,
+                        detail: model.detail
+                    )
+                }
+                return ChatSlashCommandOption.modelOptions(
+                    models,
+                    selectedID: task.agentConfiguration?[.model]
+                        ?? capabilities.defaultModelID,
+                    sourceTitle: agent.shortName
+                )
+
+            case let .api(target):
+                let models = store.availableAPITargets
+                    .filter { $0.provider == target.provider }
+                    .map { apiTarget in
+                        AgentValueOption(
+                            apiTarget.modelID,
+                            title: apiTarget.modelID
+                        )
+                    }
+                return ChatSlashCommandOption.modelOptions(
+                    models,
+                    selectedID: target.modelID,
+                    sourceTitle: target.provider.displayName
+                )
+            }
+
+        case .session:
+            return ChatSlashCommandOption.sessionOptions(
+                bindings: task.nativeSessionBindings ?? []
+            )
+        }
+    }
+
+    private func activateSlashCommandOption(
+        _ option: ChatSlashCommandOption
+    ) {
+        guard activeRun == nil,
+              !isRepositoryBusy,
+              let commandOptionTokenID,
+              composerTokens.count == 1,
+              composerTokens.first?.id == commandOptionTokenID,
+              composerTokens.first?.text == option.commandName,
+              presentedSlashCommandOptions.contains(option)
+        else {
+            dismissSlashCommandPalette()
+            return
+        }
+
+        voiceInput.stop()
+        voiceInput.clearTranscript()
+        dictationBaseDraft = ""
+        draft = option.argumentText
+        dismissSlashCommandPalette()
+        isComposerFocused = true
+    }
+
+    private func dismissSlashCommandPalette() {
+        guard isShowingSlashCommandHelp
+                || helpCommandTokenID != nil
+                || commandOptionTokenID != nil
+        else {
+            return
+        }
+        slashCommandHelpGeneration += 1
+        helpCommandTokenID = nil
+        commandOptionTokenID = nil
+        selectedSlashCommandID = nil
+        withAnimation(slashPaletteAnimation) {
+            isShowingSlashCommandHelp = false
+        }
+    }
+
+    private func activateComposerToken(_ tokenID: UUID) {
+        guard let token = composerTokens.first(where: { $0.id == tokenID }),
+              let command = ChatSlashCommandDescriptor.all.first(
+                where: { $0.name == token.text }
+              )
+        else {
+            dismissSlashCommandPalette()
+            return
+        }
+
+        if command.name == "/help" {
+            presentSlashCommandHelp(for: tokenID)
+        } else if command.argumentKind != .none {
+            presentSlashCommandOptions(for: tokenID, command: command)
+        } else {
+            dismissSlashCommandPalette()
+        }
+    }
+
+    private func replaceHelpCommandToken(
+        _ tokenID: UUID,
+        with command: ChatSlashCommandDescriptor
+    ) {
+        guard composerTokens.contains(where: {
+            $0.id == tokenID && $0.text == "/help"
+        }) else {
+            dismissSlashCommandPalette()
+            return
+        }
+
+        composerTokens = InlineComposerContent.replacingToken(
+            tokenID,
+            with: command.name,
+            in: composerTokens
+        )
+        dismissSlashCommandPalette()
+        if command.argumentKind != .none {
+            presentSlashCommandOptions(for: tokenID, command: command)
+        }
+        isComposerFocused = true
+    }
+
     private func send() {
-        let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        let text = resolvedComposerText
         guard !text.isEmpty || !draftAttachments.isEmpty,
               activeRun == nil,
               !isRepositoryBusy
@@ -442,6 +897,8 @@ struct TaskDetailView: View {
         dictationBaseDraft = ""
         draft = ""
         draftAttachments = []
+        composerTokens = []
+        dismissSlashCommandPalette()
         isComposerFocused = true
 
         Swift.Task {
@@ -506,6 +963,36 @@ struct TaskDetailView: View {
         case nil:
             AppLocalization.string("Сообщение для \(task.title)…")
         }
+    }
+
+    private var commandArgumentPlaceholder: String {
+        switch autocompletedSlashCommand?.name {
+        case "/model":
+            AppLocalization.string("Введите model-id или нажмите Enter")
+        case "/session":
+            AppLocalization.string("status, new, forget или resume…")
+        case .some(_):
+            AppLocalization.string("Enter — выполнить")
+        case nil:
+            composerPlaceholder
+        }
+    }
+
+    private var resolvedComposerText: String {
+        if composerTokens.count == 1,
+           let commandToken = composerTokens.first,
+           commandToken.utf16Offset == 0,
+           let command = autocompletedSlashCommand {
+            let arguments = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+            return arguments.isEmpty
+                ? command.name
+                : "\(command.name) \(arguments)"
+        }
+
+        return InlineComposerContent.resolvedText(
+            text: draft,
+            tokens: composerTokens
+        )
     }
 
     private func quickReplies(for message: TaskMessage) -> [String] {
@@ -578,4 +1065,12 @@ struct TaskDetailView: View {
         }
     }
 
+}
+
+private struct TaskComposerCardHeightPreferenceKey: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
+    }
 }

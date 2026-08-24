@@ -54,7 +54,7 @@ struct AgentCapabilitySet: Identifiable, Hashable, Sendable {
     var models: [AgentModelCapability]
 
     var defaultModelID: String {
-        models.first?.id ?? "default"
+        models.first?.id ?? ""
     }
 
     func model(for id: String?) -> AgentModelCapability? {
@@ -179,6 +179,21 @@ struct AgentCapabilitySet: Identifiable, Hashable, Sendable {
                     defaultValue: "disabled"
                 )
             ])
+
+        case .deepSeek:
+            definitions.append(
+                AgentParameterDefinition(
+                    id: .sandboxMode,
+                    title: "Доступ к файлам",
+                    systemImage: "folder.badge.gearshape",
+                    options: [
+                        AgentValueOption("read-only", title: "Только чтение"),
+                        AgentValueOption("workspace-write", title: "Текущий репозиторий"),
+                        AgentValueOption("danger-full-access", title: "Полный доступ")
+                    ],
+                    defaultValue: "workspace-write"
+                )
+            )
         }
 
         return definitions.filter { !$0.options.isEmpty }
@@ -232,6 +247,10 @@ enum AgentCapabilityCatalog {
                 "Claude Opus 4.6 (Thinking)",
                 "GPT-OSS 120B (Medium)"
             ].map { AgentModelCapability(id: $0, title: $0) }
+        ),
+        .deepSeek: AgentCapabilitySet(
+            kind: .deepSeek,
+            models: []
         )
     ]
 

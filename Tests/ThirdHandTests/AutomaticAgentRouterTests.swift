@@ -27,7 +27,7 @@ final class AutomaticAgentRouterTests: XCTestCase {
             usageSnapshots: [:]
         )
 
-        XCTAssertEqual(candidates, [.claudeCode, .codex, .antigravity])
+        XCTAssertEqual(candidates, [.claudeCode, .codex, .antigravity, .deepSeek])
         XCTAssertEqual(Set(candidates).count, candidates.count)
     }
 
@@ -43,7 +43,7 @@ final class AutomaticAgentRouterTests: XCTestCase {
             ]
         )
 
-        XCTAssertEqual(candidates, [.claudeCode, .antigravity])
+        XCTAssertEqual(candidates, [.claudeCode, .antigravity, .deepSeek])
     }
 
     func testAutomaticModeReturnsEmptyWhenEveryAvailableProviderIsExhausted() {

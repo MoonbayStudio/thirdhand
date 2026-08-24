@@ -56,17 +56,20 @@ struct PersonaAvatarEditor: View {
     @Binding var imageData: Data?
     @Binding var color: AgentAvatarColor
     let name: String
+    var showsPreview = true
     let onChoosePhoto: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 13) {
             HStack(alignment: .center, spacing: 13) {
-                PersonaAvatarView(
-                    imageData: imageData,
-                    name: name,
-                    color: color,
-                    size: 60
-                )
+                if showsPreview {
+                    PersonaAvatarView(
+                        imageData: imageData,
+                        name: name,
+                        color: color,
+                        size: 60
+                    )
+                }
 
                 VStack(alignment: .leading, spacing: 6) {
                     Text(
@@ -76,14 +79,15 @@ struct PersonaAvatarEditor: View {
                     )
                         .font(.callout.weight(.medium))
                         .lineLimit(2)
-                    Text("PNG, JPG или HEIC · до 25 МБ")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(2)
+
+                    if imageData == nil {
+                        Text("PNG, JPG или HEIC · до 25 МБ")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(2)
+                    }
                 }
                 .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
-
-                Spacer(minLength: 0)
             }
 
             ViewThatFits(in: .horizontal) {
@@ -98,34 +102,38 @@ struct PersonaAvatarEditor: View {
                 }
             }
 
-            VStack(alignment: .leading, spacing: 7) {
-                Text("Цвет аватара без фото")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+            if imageData == nil {
+                VStack(alignment: .leading, spacing: 7) {
+                    Text("Цвет аватара без фото")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
 
-                HStack(spacing: 10) {
-                    ForEach(AgentAvatarColor.allCases) { option in
-                        Button {
-                            color = option
-                        } label: {
-                            Circle()
-                                .fill(option.tint)
-                                .frame(width: 18, height: 18)
-                                .overlay {
-                                    if color == option {
-                                        Image(systemName: "checkmark")
-                                            .font(.system(size: 8, weight: .bold))
-                                            .foregroundStyle(.white)
+                    HStack(spacing: 10) {
+                        ForEach(AgentAvatarColor.allCases) { option in
+                            Button {
+                                color = option
+                            } label: {
+                                Circle()
+                                    .fill(option.tint)
+                                    .frame(width: 18, height: 18)
+                                    .overlay {
+                                        if color == option {
+                                            Image(systemName: "checkmark")
+                                                .font(.system(size: 8, weight: .bold))
+                                                .foregroundStyle(.white)
+                                        }
                                     }
-                                }
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityLabel(AppLocalization.string("Цвет \(option.title)"))
                         }
-                        .buttonStyle(.plain)
-                        .accessibilityLabel(AppLocalization.string("Цвет \(option.title)"))
                     }
                 }
+                .transition(.opacity.combined(with: .move(edge: .top)))
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+        .animation(.easeInOut(duration: 0.18), value: imageData == nil)
     }
 
     private var choosePhotoButton: some View {
@@ -133,7 +141,7 @@ struct PersonaAvatarEditor: View {
             Label(
                 imageData == nil
                     ? AppLocalization.string("Загрузить фото…")
-                    : AppLocalization.string("Заменить фото…"),
+                    : AppLocalization.string("Изменить фото"),
                 systemImage: "photo.badge.plus"
             )
             .lineLimit(1)
@@ -146,7 +154,7 @@ struct PersonaAvatarEditor: View {
     @ViewBuilder
     private var removePhotoButton: some View {
         if imageData != nil {
-            Button("Удалить", role: .destructive) {
+            Button(AppLocalization.string("Удалить фото"), role: .destructive) {
                 imageData = nil
             }
             .buttonStyle(.plain)

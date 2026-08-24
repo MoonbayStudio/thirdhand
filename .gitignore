@@ -5,3 +5,7 @@ dist/
 .idea/
 *.xcuserstate
 .codex/iCloud-conflict-backups/
+
+# Local design exports. Production-ready assets live in Sources/ThirdHand/Resources.
+Design/Icon Exports/
+Design/third-hand-logo-transparent.mov

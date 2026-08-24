@@ -3,6 +3,7 @@ import Speech
 import SwiftUI
 
 enum AppPreferenceKeys {
+    static let completedOnboardingVersion = "completedOnboardingVersion"
     static let appearance = "appAppearance"
     static let language = "appLanguage"
     static let voiceInputEnabled = "voiceInputEnabled"

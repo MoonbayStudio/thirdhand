@@ -272,9 +272,11 @@ struct NewTaskSheet: View {
                                 }
                             }
 
-                            Picker("Модель", selection: $modelID) {
-                                ForEach(capabilities.models) { model in
-                                    Text(model.title).tag(model.id)
+                            if !capabilities.models.isEmpty {
+                                Picker("Модель", selection: $modelID) {
+                                    ForEach(capabilities.models) { model in
+                                        Text(model.title).tag(model.id)
+                                    }
                                 }
                             }
                         } else {

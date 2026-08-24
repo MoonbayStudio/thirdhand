@@ -53,6 +53,11 @@ actor ProviderUsageService: ProviderUsageProviding {
             return await antigravitySnapshot(executablePath: executablePath)
         case .claudeCode:
             return .unknown(for: installation.kind)
+        case .deepSeek:
+            return .unknown(
+                for: installation.kind,
+                detail: "DeepSeek Harness не сообщает остаток лимита через headless CLI."
+            )
         }
     }
 

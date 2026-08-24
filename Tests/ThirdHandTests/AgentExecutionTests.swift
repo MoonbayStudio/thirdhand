@@ -147,10 +147,119 @@ final class AgentExecutionTests: XCTestCase {
         )
         let arguments = prepared.invocation.arguments
 
-        XCTAssertEqual(Array(arguments.prefix(3)), ["--ask-for-approval", "on-request", "exec"])
+        XCTAssertEqual(Array(arguments.prefix(2)), ["--ask-for-approval", "on-request"])
+        XCTAssertLessThan(
+            try! XCTUnwrap(arguments.firstIndex(of: "--ask-for-approval")),
+            try! XCTUnwrap(arguments.firstIndex(of: "exec"))
+        )
         XCTAssertTrue(arguments.contains("features.fast_mode=true"))
         XCTAssertTrue(arguments.contains("service_tier=\"fast\""))
         XCTAssertFalse(arguments.contains("--dangerously-bypass-approvals-and-sandbox"))
+    }
+
+    func testCodexInvocationStartsAndResumesPersistentNativeSession() throws {
+        let sessionID = "019-session-id"
+        let base = AgentExecutionRequest(
+            attemptID: UUID(),
+            taskID: UUID(),
+            agent: .codex,
+            executablePath: "/usr/local/bin/codex",
+            repositoryPath: "/tmp/repository",
+            prompt: "Continue",
+            configuration: [
+                AgentOptionID.model.rawValue: "gpt-5.6-sol",
+                AgentOptionID.sandboxMode.rawValue: "workspace-write"
+            ],
+            attachments: [],
+            isGitRepository: true,
+            nativeSession: .start()
+        )
+        let fresh = AgentCLIInvocationFactory.prepare(
+            request: base,
+            temporaryDirectory: URL(fileURLWithPath: "/tmp")
+        ).invocation.arguments
+        XCTAssertTrue(fresh.contains("--json"))
+        XCTAssertFalse(fresh.contains("--ephemeral"))
+        XCTAssertFalse(fresh.contains("resume"))
+        XCTAssertLessThan(
+            try XCTUnwrap(fresh.firstIndex(of: "--cd")),
+            try XCTUnwrap(fresh.firstIndex(of: "exec"))
+        )
+
+        let resumed = AgentCLIInvocationFactory.prepare(
+            request: AgentExecutionRequest(
+                attemptID: base.attemptID,
+                taskID: base.taskID,
+                agent: base.agent,
+                executablePath: base.executablePath,
+                repositoryPath: base.repositoryPath,
+                prompt: base.prompt,
+                configuration: base.configuration,
+                attachments: base.attachments,
+                isGitRepository: base.isGitRepository,
+                nativeSession: .resume(id: sessionID)
+            ),
+            temporaryDirectory: URL(fileURLWithPath: "/tmp")
+        ).invocation.arguments
+        let execIndex = try XCTUnwrap(resumed.firstIndex(of: "exec"))
+        XCTAssertEqual(resumed[execIndex + 1], "resume")
+        XCTAssertTrue(resumed.contains("--json"))
+        XCTAssertTrue(resumed.contains(sessionID))
+        XCTAssertEqual(resumed.last, "Continue")
+    }
+
+    func testClaudeInvocationStartsAndResumesPersistentNativeSession() {
+        let sessionID = UUID().uuidString.lowercased()
+        func arguments(_ directive: AgentNativeSessionDirective) -> [String] {
+            AgentCLIInvocationFactory.prepare(
+                request: AgentExecutionRequest(
+                    attemptID: UUID(),
+                    taskID: UUID(),
+                    agent: .claudeCode,
+                    executablePath: "/usr/local/bin/claude",
+                    repositoryPath: "/tmp/repository",
+                    prompt: "Continue",
+                    configuration: [:],
+                    attachments: [],
+                    isGitRepository: false,
+                    nativeSession: directive
+                ),
+                temporaryDirectory: URL(fileURLWithPath: "/tmp")
+            ).invocation.arguments
+        }
+
+        let fresh = arguments(.start(preferredID: sessionID))
+        XCTAssertFalse(fresh.contains("--no-session-persistence"))
+        XCTAssertEqual(fresh[fresh.firstIndex(of: "--session-id")! + 1], sessionID)
+
+        let resumed = arguments(.resume(id: sessionID))
+        XCTAssertFalse(resumed.contains("--no-session-persistence"))
+        XCTAssertEqual(resumed[resumed.firstIndex(of: "--resume")! + 1], sessionID)
+    }
+
+    func testOutputParserReadsCodexAndClaudeNativeSessionIDs() {
+        let codexID = "019c-thread"
+        let claudeID = "019c-session"
+        XCTAssertEqual(
+            AgentOutputParser.nativeSessionID(
+                for: .codex,
+                terminalOutput: "{\"type\":\"thread.started\",\"thread_id\":\"\(codexID)\"}\n{\"type\":\"turn.started\"}"
+            ),
+            codexID
+        )
+        XCTAssertEqual(
+            AgentOutputParser.nativeSessionID(
+                for: .claudeCode,
+                terminalOutput: "{\"type\":\"result\",\"result\":\"ok\",\"session_id\":\"\(claudeID)\"}"
+            ),
+            claudeID
+        )
+        XCTAssertNil(
+            AgentOutputParser.nativeSessionID(
+                for: .deepSeek,
+                terminalOutput: "{\"session_id\":\"ignored\"}"
+            )
+        )
     }
 
     func testClaudeAndAntigravityInvocationsUseOnlySupportedSafeFlags() throws {
@@ -213,6 +322,29 @@ final class AgentExecutionTests: XCTestCase {
             try XCTUnwrap(antigravity.firstIndex(of: "--model")),
             try XCTUnwrap(antigravity.firstIndex(of: "--print=Inspect first"))
         )
+    }
+
+    func testDeepSeekHarnessUsesHeadlessProfileAndConfiguredPermissionMode() {
+        let prepared = AgentCLIInvocationFactory.prepare(
+            request: AgentExecutionRequest(
+                attemptID: UUID(),
+                taskID: UUID(),
+                agent: .deepSeek,
+                executablePath: "/opt/homebrew/bin/dsh",
+                repositoryPath: "/tmp/repository",
+                prompt: "Inspect first",
+                configuration: [
+                    AgentOptionID.sandboxMode.rawValue: "read-only"
+                ],
+                attachments: [],
+                isGitRepository: true
+            ),
+            temporaryDirectory: URL(fileURLWithPath: "/tmp")
+        ).invocation
+
+        XCTAssertEqual(prepared.arguments, ["--profile", "headless", "Inspect first"])
+        XCTAssertEqual(prepared.environment["DSH_PERMISSION_MODE"], "read-only")
+        XCTAssertEqual(prepared.workingDirectory, "/tmp/repository")
     }
 
     func testEnvelopeDoesNotIncludePreviousChatMessages() {
@@ -337,6 +469,57 @@ final class AgentExecutionTests: XCTestCase {
         XCTAssertFalse(prompt.contains("Inspect the repository and current git diff"))
     }
 
+    func testConversationCheckpointReplacesCoveredHistoryAndKeepsNewTail() {
+        let oldUser = TaskMessage(role: .user, text: "OLD_USER_MUST_BE_COMPACTED")
+        let oldAgent = TaskMessage(role: .agent, text: "OLD_AGENT_MUST_BE_COMPACTED")
+        let newUser = TaskMessage(role: .user, text: "NEW_TAIL_MUST_REMAIN")
+        let task = CodingTask(
+            title: "Муни",
+            originalRequest: "",
+            repositoryPath: "/tmp/repository",
+            messages: [oldUser, oldAgent, newUser],
+            persona: AgentPersona(
+                prompt: "Спокойный собеседник",
+                interactionMode: .conversation
+            ),
+            portableContextCheckpoint: PortableContextCheckpoint(
+                scope: .conversation,
+                decisions: ["CHECKPOINT_FACT"],
+                progress: ["CHECKPOINT_PROGRESS"],
+                knownIssues: [],
+                nextStep: "CHECKPOINT_NEXT",
+                coveredThroughMessageID: oldAgent.id,
+                sourceMessageCount: 2,
+                estimatedOriginalTokens: 42
+            )
+        )
+
+        let prompt = ConversationEnvelopeBuilder.build(
+            task: task,
+            currentInstruction: "CURRENT_MESSAGE",
+            attachments: []
+        )
+        let inspection = ConversationEnvelopeBuilder.inspect(task: task)
+        let resumedPrompt = ConversationEnvelopeBuilder.build(
+            task: task,
+            currentInstruction: "RESUMED_CURRENT_MESSAGE",
+            attachments: [],
+            includesRecentHistory: false
+        )
+
+        XCTAssertFalse(prompt.contains("OLD_USER_MUST_BE_COMPACTED"))
+        XCTAssertFalse(prompt.contains("OLD_AGENT_MUST_BE_COMPACTED"))
+        XCTAssertTrue(prompt.contains("NEW_TAIL_MUST_REMAIN"))
+        XCTAssertTrue(prompt.contains("CHECKPOINT_FACT"))
+        XCTAssertEqual(inspection.totalMessages, 3)
+        XCTAssertEqual(inspection.includedMessages, 1)
+        XCTAssertEqual(inspection.omittedMessages, 2)
+        XCTAssertFalse(resumedPrompt.contains("NEW_TAIL_MUST_REMAIN"))
+        XCTAssertTrue(resumedPrompt.contains("RESUMED_CURRENT_MESSAGE"))
+        XCTAssertTrue(resumedPrompt.contains("CHECKPOINT_FACT"))
+        XCTAssertTrue(resumedPrompt.contains("возобновлённой нативной CLI-сессии"))
+    }
+
     func testEnvelopeLabelsValidationFreshnessAgainstCurrentGitFingerprint() throws {
         let snapshot = GitSnapshot(
             branch: "main",
@@ -421,6 +604,10 @@ final class AgentExecutionTests: XCTestCase {
         )
         XCTAssertEqual(
             AgentFailureClassifier.category(for: "RESOURCE_EXHAUSTED: quota exceeded"),
+            .quotaExceeded
+        )
+        XCTAssertEqual(
+            AgentFailureClassifier.category(for: "Insufficient balance for this request"),
             .quotaExceeded
         )
         XCTAssertEqual(

@@ -140,7 +140,24 @@ actor TaskOrchestrator {
             terminalOutput: processResult.output,
             responseFileURL: prepared.responseFileURL
         )
-        return AgentExecutionResponse(text: responseText, exitCode: processResult.exitCode)
+        let parsedSessionID = AgentOutputParser.nativeSessionID(
+            for: request.agent,
+            terminalOutput: processResult.output
+        )
+        let nativeSessionID: String?
+        switch request.nativeSession {
+        case .disabled:
+            nativeSessionID = nil
+        case let .start(preferredID):
+            nativeSessionID = parsedSessionID ?? preferredID
+        case let .resume(sessionID):
+            nativeSessionID = parsedSessionID ?? sessionID
+        }
+        return AgentExecutionResponse(
+            text: responseText,
+            exitCode: processResult.exitCode,
+            nativeSessionID: nativeSessionID
+        )
     }
 
     func cancel(taskID: UUID, attemptID: UUID) async {
@@ -185,7 +202,8 @@ actor TaskOrchestrator {
                 prompt: request.prompt,
                 configuration: request.configuration,
                 attachments: attachments,
-                isGitRepository: request.isGitRepository
+                isGitRepository: request.isGitRepository,
+                nativeSession: request.nativeSession
             ),
             accessedURLs
         )
@@ -193,6 +211,43 @@ actor TaskOrchestrator {
 }
 
 enum AgentOutputParser {
+    static func nativeSessionID(
+        for agent: AgentKind,
+        terminalOutput: String
+    ) -> String? {
+        let cleanedOutput = clean(terminalOutput)
+        switch agent {
+        case .codex:
+            for object in jsonObjects(from: cleanedOutput) {
+                guard object["type"] as? String == "thread.started",
+                      let threadID = object["thread_id"] as? String
+                else {
+                    continue
+                }
+                return normalizedSessionID(threadID)
+            }
+            return capturedSessionID(
+                in: cleanedOutput,
+                key: "thread_id"
+            )
+
+        case .claudeCode:
+            for object in jsonObjects(from: cleanedOutput) {
+                if let sessionID = object["session_id"] as? String,
+                   let normalized = normalizedSessionID(sessionID) {
+                    return normalized
+                }
+            }
+            return capturedSessionID(
+                in: cleanedOutput,
+                key: "session_id"
+            )
+
+        case .antigravity, .deepSeek:
+            return nil
+        }
+    }
+
     static func finalResponse(
         for agent: AgentKind,
         terminalOutput: String,
@@ -247,5 +302,34 @@ enum AgentOutputParser {
             return result.trimmingCharacters(in: .whitespacesAndNewlines)
         }
         return nil
+    }
+
+    private static func jsonObjects(from output: String) -> [[String: Any]] {
+        let candidates = [output] + output.split(separator: "\n").map(String.init)
+        return candidates.compactMap { candidate in
+            guard let data = candidate.data(using: .utf8) else { return nil }
+            return try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        }
+    }
+
+    private static func capturedSessionID(in output: String, key: String) -> String? {
+        let escapedKey = NSRegularExpression.escapedPattern(for: key)
+        guard let expression = try? NSRegularExpression(
+            pattern: #"\"\#(escapedKey)\"\s*:\s*\"([^\"]+)\""#
+        ) else {
+            return nil
+        }
+        let range = NSRange(output.startIndex..., in: output)
+        guard let match = expression.firstMatch(in: output, range: range),
+              let valueRange = Range(match.range(at: 1), in: output)
+        else {
+            return nil
+        }
+        return normalizedSessionID(String(output[valueRange]))
+    }
+
+    private static func normalizedSessionID(_ value: String) -> String? {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
     }
 }

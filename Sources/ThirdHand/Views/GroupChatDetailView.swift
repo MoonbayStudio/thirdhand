@@ -240,14 +240,20 @@ struct GroupChatDetailView: View {
                         .help("Остановить обсуждение")
                     } else {
                         Button(action: send) {
-                            Image(systemName: "arrow.up")
-                                .font(.system(size: 13, weight: .bold))
-                                .foregroundStyle(canSend ? Color.white : Color.secondary)
-                                .frame(width: 28, height: 28)
-                                .background(
-                                    canSend ? Color.accentColor : Color.secondary.opacity(0.12),
-                                    in: Circle()
-                                )
+                            ZStack {
+                                Circle()
+                                    .fill(
+                                        canSend
+                                            ? Color.accentColor
+                                            : Color.secondary.opacity(0.12)
+                                    )
+
+                                Image(systemName: "arrow.up")
+                                    .font(.system(size: 13, weight: .bold))
+                                    .foregroundStyle(canSend ? Color.white : Color.secondary)
+                                    .offset(y: 0.75)
+                            }
+                            .frame(width: 28, height: 28)
                         }
                         .buttonStyle(.plain)
                         .disabled(!canSend)

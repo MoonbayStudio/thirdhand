@@ -350,6 +350,8 @@
 "Фикс." = "Naprawił";
 "Формирует ответ" = "Przygotowanie odpowiedzi";
 "Фото загружено" = "Zdjęcie przesłane";
+"Изменить фото" = "Zmień zdjęcie";
+"Удалить фото" = "Usuń zdjęcie";
 "Цвет %@" = "%@ kolor";
 "Цвет аватара без фото" = "Kolor awatara bez zdjęcia";
 "Цель ещё не задана." = "Nie wyznaczono jeszcze żadnego celu.";
@@ -370,3 +372,10 @@
 "ждёт описания" = "czekam na opis";
 "настраивает профиль…" = "konfiguracja profilu…";
 "печатает…" = "pisanie na maszynie…";
+
+/* App onboarding */
+"Добро пожаловать в Third Hand" = "Witaj w Third Hand";
+"Сначала настройте язык и доступность. Всё это можно изменить позже." = "Najpierw wybierz język i ustawienia dostępności. Możesz je później zmienić.";
+"Открыть настройки macOS" = "Otwórz ustawienia macOS";
+"Продолжить" = "Dalej";
+"Назад" = "Wstecz";

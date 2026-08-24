@@ -30,7 +30,7 @@ enum AgentProfileGenerationPromptBuilder {
         - avatarColor: только indigo, blue, teal, green, orange или pink.
         - interactionMode: automatic для смешанного сценария, где с личностью можно и просто поговорить, и дать ей работу по проекту; conversation только если ей никогда не нужны Git и рабочая папка; workspace только если она всегда выполняет проектные задачи.
         - routingMode: automatic, если пользователь явно не закрепил конкретного провайдера или модель; иначе manual.
-        - agentKind: только codex, claudeCode, antigravity либо null. Не выдумывай недоступный провайдер.
+        - agentKind: только codex, claudeCode, antigravity, deepSeek либо null. Не выдумывай недоступный провайдер.
         - modelID: точный ID из списка ниже либо null. Не выдумывай ID.
 
         Доступные провайдеры и модели:

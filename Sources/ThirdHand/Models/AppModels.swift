@@ -66,6 +66,7 @@ enum AgentKind: String, Codable, CaseIterable, Identifiable, Sendable {
     case codex
     case claudeCode
     case antigravity
+    case deepSeek
 
     var id: String { rawValue }
 
@@ -74,6 +75,7 @@ enum AgentKind: String, Codable, CaseIterable, Identifiable, Sendable {
         case .codex: "Codex CLI"
         case .claudeCode: "Claude Code"
         case .antigravity: "Antigravity"
+        case .deepSeek: "DeepSeek Harness"
         }
     }
 
@@ -82,6 +84,7 @@ enum AgentKind: String, Codable, CaseIterable, Identifiable, Sendable {
         case .codex: ["codex"]
         case .claudeCode: ["claude"]
         case .antigravity: ["agy", "antigravity"]
+        case .deepSeek: ["/opt/homebrew/bin/dsh", "dsh"]
         }
     }
 
@@ -90,6 +93,14 @@ enum AgentKind: String, Codable, CaseIterable, Identifiable, Sendable {
         case .codex: "Codex"
         case .claudeCode: "Claude"
         case .antigravity: "Antigravity"
+        case .deepSeek: "DeepSeek"
+        }
+    }
+
+    var supportsNativeSessionResume: Bool {
+        switch self {
+        case .codex, .claudeCode: true
+        case .antigravity, .deepSeek: false
         }
     }
 }
@@ -533,6 +544,90 @@ struct ConversationHandoff: Codable, Hashable {
     var updatedAt: Date
 }
 
+enum AgentSessionScope: String, Codable, Hashable, Sendable {
+    case conversation
+    case workspace
+
+    init(interactionMode: AgentInteractionMode) {
+        self = interactionMode == .workspace ? .workspace : .conversation
+    }
+
+    var title: String {
+        switch self {
+        case .conversation: AppLocalization.string("Общение")
+        case .workspace: AppLocalization.string("Проект")
+        }
+    }
+}
+
+struct AgentSessionBinding: Codable, Hashable, Sendable {
+    let agent: AgentKind
+    let scope: AgentSessionScope
+    var sessionID: String
+    var workingDirectory: String
+    var modelID: String?
+    let createdAt: Date
+    var updatedAt: Date
+
+    init(
+        agent: AgentKind,
+        scope: AgentSessionScope,
+        sessionID: String,
+        workingDirectory: String,
+        modelID: String? = nil,
+        createdAt: Date = .now,
+        updatedAt: Date = .now
+    ) {
+        self.agent = agent
+        self.scope = scope
+        self.sessionID = sessionID
+        self.workingDirectory = workingDirectory
+        self.modelID = modelID
+        self.createdAt = createdAt
+        self.updatedAt = updatedAt
+    }
+}
+
+struct PortableContextCheckpoint: Codable, Hashable, Sendable {
+    let id: UUID
+    let scope: AgentSessionScope
+    var decisions: [String]
+    var progress: [String]
+    var knownIssues: [String]
+    var nextStep: String
+    var coveredThroughMessageID: UUID?
+    var sourceMessageCount: Int
+    var estimatedOriginalTokens: Int
+    var modelID: String?
+    let createdAt: Date
+
+    init(
+        id: UUID = UUID(),
+        scope: AgentSessionScope,
+        decisions: [String],
+        progress: [String],
+        knownIssues: [String],
+        nextStep: String,
+        coveredThroughMessageID: UUID?,
+        sourceMessageCount: Int,
+        estimatedOriginalTokens: Int,
+        modelID: String? = nil,
+        createdAt: Date = .now
+    ) {
+        self.id = id
+        self.scope = scope
+        self.decisions = decisions
+        self.progress = progress
+        self.knownIssues = knownIssues
+        self.nextStep = nextStep
+        self.coveredThroughMessageID = coveredThroughMessageID
+        self.sourceMessageCount = sourceMessageCount
+        self.estimatedOriginalTokens = estimatedOriginalTokens
+        self.modelID = modelID
+        self.createdAt = createdAt
+    }
+}
+
 enum ValidationOutcome: String, Codable {
     case passed
     case failed
@@ -775,6 +870,8 @@ struct CodingTask: Identifiable, Codable, Hashable {
     var messages: [TaskMessage]?
     var persona: AgentPersona?
     var conversationHandoff: ConversationHandoff?
+    var nativeSessionBindings: [AgentSessionBinding]?
+    var portableContextCheckpoint: PortableContextCheckpoint?
     let createdAt: Date
     var updatedAt: Date
 
@@ -872,6 +969,8 @@ struct CodingTask: Identifiable, Codable, Hashable {
         messages: [TaskMessage]? = [],
         persona: AgentPersona? = nil,
         conversationHandoff: ConversationHandoff? = nil,
+        nativeSessionBindings: [AgentSessionBinding]? = nil,
+        portableContextCheckpoint: PortableContextCheckpoint? = nil,
         createdAt: Date = .now,
         updatedAt: Date = .now
     ) {
@@ -894,6 +993,8 @@ struct CodingTask: Identifiable, Codable, Hashable {
         self.messages = messages
         self.persona = persona
         self.conversationHandoff = conversationHandoff
+        self.nativeSessionBindings = nativeSessionBindings
+        self.portableContextCheckpoint = portableContextCheckpoint
         self.createdAt = createdAt
         self.updatedAt = updatedAt
     }

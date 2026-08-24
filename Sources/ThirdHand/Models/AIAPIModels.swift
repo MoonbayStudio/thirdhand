@@ -2,6 +2,7 @@ import Foundation
 
 enum AIAPIProvider: String, Codable, CaseIterable, Hashable, Identifiable, Sendable {
     case openRouter
+    case deepSeek
     case openAI
     case anthropic
     case googleGemini
@@ -11,6 +12,7 @@ enum AIAPIProvider: String, Codable, CaseIterable, Hashable, Identifiable, Senda
     var displayName: String {
         switch self {
         case .openRouter: "OpenRouter"
+        case .deepSeek: "DeepSeek"
         case .openAI: "OpenAI"
         case .anthropic: "Anthropic"
         case .googleGemini: "Google Gemini"
@@ -20,6 +22,7 @@ enum AIAPIProvider: String, Codable, CaseIterable, Hashable, Identifiable, Senda
     var shortName: String {
         switch self {
         case .openRouter: "OpenRouter"
+        case .deepSeek: "DeepSeek API"
         case .openAI: "OpenAI"
         case .anthropic: "Claude API"
         case .googleGemini: "Gemini API"
@@ -29,6 +32,7 @@ enum AIAPIProvider: String, Codable, CaseIterable, Hashable, Identifiable, Senda
     var keyPlaceholder: String {
         switch self {
         case .openRouter: "sk-or-v1-…"
+        case .deepSeek: "sk-…"
         case .openAI: "sk-…"
         case .anthropic: "sk-ant-…"
         case .googleGemini: "AIza…"
@@ -38,6 +42,7 @@ enum AIAPIProvider: String, Codable, CaseIterable, Hashable, Identifiable, Senda
     var privacyHost: String {
         switch self {
         case .openRouter: "openrouter.ai"
+        case .deepSeek: "api.deepseek.com"
         case .openAI: "api.openai.com"
         case .anthropic: "api.anthropic.com"
         case .googleGemini: "generativelanguage.googleapis.com"
@@ -110,6 +115,7 @@ enum AgentExecutionTarget: Hashable, Sendable {
         case let .cli(agent): agent
         case let .api(target):
             switch target.provider {
+            case .deepSeek: .deepSeek
             case .openAI: .codex
             case .anthropic: .claudeCode
             case .openRouter, .googleGemini: .antigravity
@@ -183,6 +189,9 @@ enum AIAPIPreferences {
             let legacy = defaults.string(forKey: OpenRouterPreferences.handoffModelIDKey)?
                 .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             return legacy.isEmpty ? OpenRouterPreferences.freeConversationModelID : legacy
+        }
+        if provider == .deepSeek {
+            return "deepseek-v4-flash"
         }
         return ""
     }

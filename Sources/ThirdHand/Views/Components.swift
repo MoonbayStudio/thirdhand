@@ -207,6 +207,7 @@ extension AgentKind {
         case .codex: .blue
         case .claudeCode: .orange
         case .antigravity: .purple
+        case .deepSeek: .cyan
         }
     }
 
@@ -215,6 +216,7 @@ extension AgentKind {
         case .codex: "terminal.fill"
         case .claudeCode: "sparkles"
         case .antigravity: "arrow.up.and.down.and.arrow.left.and.right"
+        case .deepSeek: "water.waves"
         }
     }
 }
@@ -223,6 +225,7 @@ extension AIAPIProvider {
     var tint: Color {
         switch self {
         case .openRouter: .indigo
+        case .deepSeek: .cyan
         case .openAI: .green
         case .anthropic: .orange
         case .googleGemini: .blue
@@ -232,6 +235,7 @@ extension AIAPIProvider {
     var systemImage: String {
         switch self {
         case .openRouter: "point.3.connected.trianglepath.dotted"
+        case .deepSeek: "water.waves"
         case .openAI: "sparkles"
         case .anthropic: "text.bubble.fill"
         case .googleGemini: "diamond.fill"

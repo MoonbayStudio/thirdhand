@@ -252,6 +252,89 @@ final class OpenRouterServiceTests: XCTestCase {
         }
     }
 
+    func testDeepSeekUsesOfficialModelAndChatEndpoints() async throws {
+        let session = makeStubbedSession()
+        defer { session.invalidateAndCancel() }
+        var requestedPaths: [String] = []
+        var capturedChatRequest: URLRequest?
+        var capturedChatBody: Data?
+        OpenRouterURLProtocolStub.handler = { request in
+            requestedPaths.append(request.url?.path ?? "")
+            switch request.url?.path {
+            case "/models":
+                return (
+                    200,
+                    Data(
+                        #"{"object":"list","data":[{"id":"deepseek-v4-pro","object":"model","owned_by":"deepseek"},{"id":"deepseek-v4-flash","object":"model","owned_by":"deepseek"}]}"#.utf8
+                    )
+                )
+            case "/chat/completions":
+                capturedChatRequest = request
+                capturedChatBody = requestBodyData(request)
+                return (
+                    200,
+                    Data(
+                        #"{"choices":[{"message":{"role":"assistant","content":"DeepSeek ready"}}]}"#.utf8
+                    )
+                )
+            default:
+                return (404, Data())
+            }
+        }
+
+        let client = AIAPIClient(session: session)
+        let models = try await client.fetchModels(
+            provider: .deepSeek,
+            apiKey: "deepseek-secret"
+        )
+        let response = try await client.complete(
+            provider: .deepSeek,
+            apiKey: "deepseek-secret",
+            modelID: "deepseek-v4-pro",
+            prompt: "Hello",
+            systemPrompt: "Be concise",
+            maximumOutputTokens: 512
+        )
+
+        XCTAssertEqual(requestedPaths, ["/models", "/chat/completions"])
+        XCTAssertEqual(models.map(\.id), ["deepseek-v4-flash", "deepseek-v4-pro"])
+        XCTAssertEqual(response.text, "DeepSeek ready")
+        XCTAssertEqual(response.target.provider, .deepSeek)
+
+        let request = try XCTUnwrap(capturedChatRequest)
+        XCTAssertEqual(request.url?.host, "api.deepseek.com")
+        XCTAssertEqual(
+            request.value(forHTTPHeaderField: "Authorization"),
+            "Bearer deepseek-secret"
+        )
+        let body = try XCTUnwrap(capturedChatBody)
+        let payload = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: body) as? [String: Any]
+        )
+        XCTAssertEqual(payload["model"] as? String, "deepseek-v4-pro")
+        XCTAssertEqual(payload["max_tokens"] as? Int, 512)
+        let messages = try XCTUnwrap(payload["messages"] as? [[String: String]])
+        XCTAssertEqual(messages.map { $0["role"] }, ["system", "user"])
+        XCTAssertEqual(messages.map { $0["content"] }, ["Be concise", "Hello"])
+    }
+
+    func testDeepSeekHasStableDefaultModelAndNativeFallbackIdentity() {
+        let defaults = UserDefaults(suiteName: #function)!
+        defaults.removePersistentDomain(forName: #function)
+        defer { defaults.removePersistentDomain(forName: #function) }
+
+        XCTAssertEqual(
+            AIAPIPreferences.primaryModelID(for: .deepSeek, defaults: defaults),
+            "deepseek-v4-flash"
+        )
+        XCTAssertEqual(
+            AgentExecutionTarget.api(
+                AIAPITarget(provider: .deepSeek, modelID: "deepseek-v4-pro")
+            ).fallbackAgentKind,
+            .deepSeek
+        )
+    }
+
     private func makeStubbedSession() -> URLSession {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [OpenRouterURLProtocolStub.self]

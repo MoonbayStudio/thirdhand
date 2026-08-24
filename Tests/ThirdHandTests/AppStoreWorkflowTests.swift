@@ -117,6 +117,7 @@ final class AppStoreWorkflowTests: XCTestCase {
         let updated = try XCTUnwrap(store.tasks.first)
         XCTAssertEqual(updated.currentAgent, .claudeCode)
         XCTAssertEqual(updated.status, .ready)
+        XCTAssertNotNil(updated.portableContextCheckpoint)
         XCTAssertTrue(updated.chatMessages.contains { $0.text.contains("API-handoff недоступен") })
         XCTAssertTrue(updated.chatMessages.contains { $0.text.contains("LOCAL_FALLBACK_OK") })
     }
@@ -775,6 +776,209 @@ final class AppStoreWorkflowTests: XCTestCase {
         ).trimmingCharacters(in: .whitespacesAndNewlines)
         XCTAssertNotEqual(workingDirectory, fixture.repository.path)
         XCTAssertTrue(workingDirectory.contains("Conversation Sessions"))
+    }
+
+    func testSessionResumeSlashCommandPersistsBindingAcrossStoreReload() async throws {
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let task = CodingTask(
+            title: "Муни",
+            originalRequest: "",
+            repositoryPath: fixture.repository.path,
+            currentAgent: .codex,
+            routingMode: .manual,
+            persona: AgentPersona(
+                prompt: "Постоянный собеседник",
+                interactionMode: .conversation
+            )
+        )
+        let store = makeStore(fixture: fixture)
+        store.tasks = [task]
+        store.selection = task.id
+
+        await store.submitMessage(
+            taskID: task.id,
+            text: "/session resume codex-session-123",
+            attachments: []
+        )
+
+        let updated = try XCTUnwrap(store.tasks.first)
+        XCTAssertEqual(updated.nativeSessionBindings?.count, 1)
+        XCTAssertEqual(updated.nativeSessionBindings?.first?.agent, .codex)
+        XCTAssertEqual(updated.nativeSessionBindings?.first?.scope, .conversation)
+        XCTAssertEqual(updated.nativeSessionBindings?.first?.sessionID, "codex-session-123")
+        XCTAssertTrue(updated.chatMessages.allSatisfy { $0.role == .system })
+
+        let reloaded = AppStore(
+            persistence: PersistenceService(stateURL: fixture.stateURL),
+            performAgentDiscovery: false
+        )
+        XCTAssertEqual(
+            reloaded.tasks.first?.nativeSessionBindings?.first?.sessionID,
+            "codex-session-123"
+        )
+
+        await reloaded.submitMessage(
+            taskID: task.id,
+            text: "/context",
+            attachments: []
+        )
+        XCTAssertTrue(
+            reloaded.tasks.first?.chatMessages.last?.text.contains("Native resume: Codex") == true
+        )
+        XCTAssertTrue(
+            reloaded.tasks.first?.chatMessages.last?.text.contains(fixture.stateURL.path) == true
+        )
+    }
+
+    func testClaudeNativeSessionAutomaticallyResumesAfterStoreReload() async throws {
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let invocationLog = fixture.root.appendingPathComponent("claude-session-log.txt")
+        let fakeClaude = try makeExecutable(
+            named: "persistent-claude-cli",
+            contents: """
+            #!/bin/sh
+            mode=missing
+            session=missing
+            while [ "$#" -gt 0 ]; do
+                case "$1" in
+                    --session-id)
+                        mode=fresh
+                        session="$2"
+                        shift 2
+                        ;;
+                    --resume)
+                        mode=resume
+                        session="$2"
+                        shift 2
+                        ;;
+                    *)
+                        shift
+                        ;;
+                esac
+            done
+            printf '%s:%s\n' "$mode" "$session" >> '\(invocationLog.path)'
+            printf '{"type":"result","result":"SESSION_OK","session_id":"%s"}\n' "$session"
+            """,
+            in: fixture.root
+        )
+        let task = CodingTask(
+            title: "Муни",
+            originalRequest: "",
+            repositoryPath: fixture.repository.path,
+            currentAgent: .claudeCode,
+            routingMode: .manual,
+            persona: AgentPersona(
+                prompt: "Постоянный собеседник",
+                interactionMode: .conversation
+            )
+        )
+        let firstStore = makeStore(fixture: fixture)
+        firstStore.tasks = [task]
+        firstStore.selection = task.id
+        firstStore.agentInstallations = [
+            AgentInstallation(kind: .codex, executablePath: nil),
+            AgentInstallation(kind: .claudeCode, executablePath: fakeClaude.path),
+            AgentInstallation(kind: .antigravity, executablePath: nil),
+            AgentInstallation(kind: .deepSeek, executablePath: nil)
+        ]
+
+        await firstStore.submitMessage(
+            taskID: task.id,
+            text: "Первое сообщение",
+            attachments: []
+        )
+        let firstSessionID = try XCTUnwrap(
+            firstStore.tasks.first?.nativeSessionBindings?.first?.sessionID
+        )
+
+        let secondStore = AppStore(
+            persistence: PersistenceService(stateURL: fixture.stateURL),
+            performAgentDiscovery: false
+        )
+        secondStore.agentInstallations = firstStore.agentInstallations
+        await secondStore.submitMessage(
+            taskID: task.id,
+            text: "Сообщение после перезапуска",
+            attachments: []
+        )
+
+        let lines = try String(contentsOf: invocationLog, encoding: .utf8)
+            .split(whereSeparator: \.isNewline)
+            .map(String.init)
+        XCTAssertEqual(lines, [
+            "fresh:\(firstSessionID)",
+            "resume:\(firstSessionID)"
+        ])
+        XCTAssertEqual(
+            secondStore.tasks.first?.nativeSessionBindings?.first?.sessionID,
+            firstSessionID
+        )
+    }
+
+    func testCompactSlashCommandPersistsCheckpointAndRetiresNativeSessions() async throws {
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let compressor = RecordingHandoffCompressor(
+            result: CompressedAgentHandoff(
+                decisions: ["Пользователь предпочитает короткие ответы"],
+                progress: ["Обсудили архитектуру сессий"],
+                knownIssues: ["Нужно проверить UI"],
+                nextStep: "Продолжить с command palette",
+                modelID: "test/handoff-model"
+            )
+        )
+        let task = CodingTask(
+            title: "Муни",
+            originalRequest: "",
+            repositoryPath: fixture.repository.path,
+            currentAgent: .codex,
+            routingMode: .manual,
+            messages: [
+                TaskMessage(role: .user, text: "Сделай команды"),
+                TaskMessage(role: .agent, text: "Хорошо")
+            ],
+            persona: AgentPersona(
+                prompt: "Постоянный собеседник",
+                interactionMode: .conversation
+            ),
+            nativeSessionBindings: [
+                AgentSessionBinding(
+                    agent: .codex,
+                    scope: .conversation,
+                    sessionID: "old-native-session",
+                    workingDirectory: fixture.root.path
+                )
+            ]
+        )
+        let store = AppStore(
+            persistence: PersistenceService(stateURL: fixture.stateURL),
+            performAgentDiscovery: false,
+            handoffCompressor: compressor
+        )
+        store.tasks = [task]
+        store.selection = task.id
+
+        await store.submitMessage(taskID: task.id, text: "/compact", attachments: [])
+
+        let updated = try XCTUnwrap(store.tasks.first)
+        let checkpoint = try XCTUnwrap(updated.portableContextCheckpoint)
+        XCTAssertEqual(checkpoint.scope, .conversation)
+        XCTAssertEqual(checkpoint.decisions, ["Пользователь предпочитает короткие ответы"])
+        XCTAssertEqual(checkpoint.coveredThroughMessageID, task.chatMessages.last?.id)
+        XCTAssertNil(updated.nativeSessionBindings)
+        XCTAssertTrue(updated.chatMessages.last?.text.contains("чистую нативную сессию") == true)
+        XCTAssertTrue(store.activeRuns.isEmpty)
+
+        let reloaded = AppStore(
+            persistence: PersistenceService(stateURL: fixture.stateURL),
+            performAgentDiscovery: false
+        )
+        XCTAssertEqual(
+            reloaded.tasks.first?.portableContextCheckpoint?.modelID,
+            "test/handoff-model"
+        )
     }
 
     func testDeletionRemovesOnlyTaskRecordAndKeepsRepository() throws {

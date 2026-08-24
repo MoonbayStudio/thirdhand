@@ -19,7 +19,7 @@ enum AgentActivityStage: String, CaseIterable, Hashable, Identifiable, Sendable 
     var title: String {
         switch self {
         case .preparing: AppLocalization.string("Готовит контекст")
-        case .compressingContext: AppLocalization.string("Сжимает handoff")
+        case .compressingContext: AppLocalization.string("Сжимает контекст")
         case .analyzing: AppLocalization.string("Анализирует задачу")
         case .readingFiles: AppLocalization.string("Читает файлы")
         case .readingSources: AppLocalization.string("Читает источники")
@@ -36,7 +36,7 @@ enum AgentActivityStage: String, CaseIterable, Hashable, Identifiable, Sendable 
     var detail: String {
         switch self {
         case .preparing: AppLocalization.string("Собирает Task, Git-снимок и handoff")
-        case .compressingContext: AppLocalization.string("API-модель готовит компактный контекст для следующего агента")
+        case .compressingContext: AppLocalization.string("Готовит постоянный checkpoint для новой сессии или handoff")
         case .analyzing: AppLocalization.string("Определяет следующий шаг")
         case .readingFiles: AppLocalization.string("Изучает содержимое репозитория")
         case .readingSources: AppLocalization.string("Просматривает внешние материалы")

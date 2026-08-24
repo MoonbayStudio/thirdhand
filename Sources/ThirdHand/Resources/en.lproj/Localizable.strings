@@ -236,6 +236,8 @@
 "Аватар агента %@" = "%@ agent avatar";
 "Добавьте фотографию" = "Add a photo";
 "Фото загружено" = "Photo uploaded";
+"Изменить фото" = "Change photo";
+"Удалить фото" = "Remove photo";
 "PNG, JPG или HEIC · до 25 МБ" = "PNG, JPG, or HEIC · up to 25 MB";
 "Цвет аватара без фото" = "Avatar color without a photo";
 "Загрузить фото…" = "Upload photo…";
@@ -403,3 +405,10 @@
 "При переключении CLI OpenRouter получает промпт личности, спецификацию, semantic handoff, последние 10 сообщений, ограниченный хвост вывода CLI и Git-сводку. Полный diff и вложения отдельно не отправляются; вывод CLI может содержать фрагменты, которые успел показать агент." = "During CLI failover, OpenRouter receives the personality prompt, specification, semantic handoff, last 10 messages, a bounded tail of CLI output, and a Git summary. The full diff and attachments aren't sent separately; CLI output may include fragments shown by the agent.";
 "openrouter/free может выбирать разных бесплатных провайдеров; для них действуют собственные правила хранения данных и более низкие лимиты доступности." = "openrouter/free can select different free providers, each with its own data retention policy and lower availability limits.";
 "API-ключ передаётся только OpenRouter в заголовке авторизации, хранится в Keychain и не записывается в UserDefaults или state.json." = "The API key is sent only to OpenRouter in the authorization header, stored in Keychain, and never written to UserDefaults or state.json.";
+
+/* App onboarding */
+"Добро пожаловать в Third Hand" = "Welcome to Third Hand";
+"Сначала настройте язык и доступность. Всё это можно изменить позже." = "First, choose your language and accessibility preferences. You can change them later.";
+"Открыть настройки macOS" = "Open macOS Settings";
+"Продолжить" = "Continue";
+"Назад" = "Back";

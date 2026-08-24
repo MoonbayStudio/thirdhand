@@ -18,7 +18,7 @@ struct ThirdHandApp: App {
     var body: some Scene {
         WindowGroup("Third Hand", id: "main") {
             AppPreferencesHost {
-                RootView()
+                AppLaunchView()
                     .environment(store)
                     .frame(
                         minWidth: 1_040,

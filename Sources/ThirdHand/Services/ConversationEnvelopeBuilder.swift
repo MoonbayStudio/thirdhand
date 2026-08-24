@@ -1,5 +1,14 @@
 import Foundation
 
+struct ConversationContextInspection: Hashable, Sendable {
+    let totalMessages: Int
+    let includedMessages: Int
+    let omittedMessages: Int
+    let estimatedCharacters: Int
+    let estimatedTokens: Int
+    let checkpoint: PortableContextCheckpoint?
+}
+
 enum ConversationEnvelopeBuilder {
     private static let maximumHistoryMessages = 20
     private static let maximumMessageCharacters = 2_400
@@ -7,17 +16,18 @@ enum ConversationEnvelopeBuilder {
     static func build(
         task: CodingTask,
         currentInstruction: String,
-        attachments: [TaskAttachment]
+        attachments: [TaskAttachment],
+        includesRecentHistory: Bool = true
     ) -> String {
         let persona = task.effectivePersona
-        var history = task.chatMessages.filter { $0.role != .system }
+        var history = eligibleHistory(for: task)
         if let latest = history.last,
            latest.role == .user,
            normalized(latest.text) == normalized(currentInstruction) {
             history.removeLast()
         }
 
-        let recentHistory = history.suffix(maximumHistoryMessages).map { message in
+        let recentHistory = (includesRecentHistory ? history.suffix(maximumHistoryMessages) : []).map { message in
             let speaker = message.role == .agent ? task.title : "Пользователь"
             let fileNames = message.fileAttachments.map(\.fileName)
             let files = fileNames.isEmpty
@@ -28,7 +38,7 @@ enum ConversationEnvelopeBuilder {
         let attachmentSummary = attachments.map {
             "- \($0.fileName): \($0.filePath)"
         }
-        let continuationContext = task.conversationHandoff.map { handoff in
+        let automaticHandoff = task.conversationHandoff.map { handoff in
             """
             Важные факты и предпочтения:
             \(list(handoff.facts))
@@ -43,6 +53,12 @@ enum ConversationEnvelopeBuilder {
             \(limited(handoff.nextReply))
             """
         }
+        let portableCheckpoint = task.portableContextCheckpoint.flatMap { checkpoint in
+            checkpoint.scope == .conversation ? checkpoint : nil
+        }.map(checkpointDescription)
+        let continuationContext = [portableCheckpoint, automaticHandoff]
+            .compactMap { $0 }
+            .joined(separator: "\n\n")
 
         return """
         Ты — \(task.title), постоянный собеседник пользователя в приложении Third Hand.
@@ -63,11 +79,13 @@ enum ConversationEnvelopeBuilder {
         - Если пользователь попросит работать с кодом или файлами проекта, предложи переключить сценарий агента на «Проект» в правой панели.
 
         <recent_conversation>
-        \(recentHistory.isEmpty ? "История пока пуста." : recentHistory.joined(separator: "\n"))
+        \(recentHistory.isEmpty
+            ? (includesRecentHistory ? "История пока пуста." : "История уже хранится в возобновлённой нативной CLI-сессии.")
+            : recentHistory.joined(separator: "\n"))
         </recent_conversation>
 
         <provider_handoff>
-        \(continuationContext ?? "Сжатого контекста переключения нет.")
+        \(continuationContext.isEmpty ? "Сжатого контекста переключения нет." : continuationContext)
         </provider_handoff>
 
         <current_user_message>
@@ -77,6 +95,65 @@ enum ConversationEnvelopeBuilder {
         <attached_files>
         \(attachmentSummary.isEmpty ? "- Нет." : attachmentSummary.joined(separator: "\n"))
         </attached_files>
+        """
+    }
+
+    static func inspect(task: CodingTask) -> ConversationContextInspection {
+        let allMessages = task.chatMessages.filter { $0.role != .system }
+        let eligibleMessages = eligibleHistory(for: task)
+        let includedMessages = Array(eligibleMessages.suffix(maximumHistoryMessages))
+        let checkpoint = task.portableContextCheckpoint.flatMap {
+            $0.scope == .conversation ? $0 : nil
+        }
+        let messageCharacters = includedMessages.reduce(0) {
+            $0 + min($1.text.count, maximumMessageCharacters)
+        }
+        let checkpointCharacters = checkpoint.map { value in
+            (value.decisions + value.progress + value.knownIssues).reduce(0) {
+                $0 + $1.count
+            } + value.nextStep.count
+        } ?? 0
+        let estimatedCharacters = messageCharacters
+            + checkpointCharacters
+            + task.effectivePersona.prompt.count
+
+        return ConversationContextInspection(
+            totalMessages: allMessages.count,
+            includedMessages: includedMessages.count,
+            omittedMessages: max(0, allMessages.count - includedMessages.count),
+            estimatedCharacters: estimatedCharacters,
+            estimatedTokens: max(1, Int(ceil(Double(estimatedCharacters) / 4.0))),
+            checkpoint: checkpoint
+        )
+    }
+
+    private static func eligibleHistory(for task: CodingTask) -> [TaskMessage] {
+        let history = task.chatMessages.filter { $0.role != .system }
+        guard let checkpoint = task.portableContextCheckpoint,
+              checkpoint.scope == .conversation,
+              let coveredID = checkpoint.coveredThroughMessageID,
+              let coveredIndex = history.firstIndex(where: { $0.id == coveredID })
+        else {
+            return history
+        }
+        return Array(history.suffix(from: history.index(after: coveredIndex)))
+    }
+
+    private static func checkpointDescription(_ checkpoint: PortableContextCheckpoint) -> String {
+        """
+        Постоянный checkpoint от \(checkpoint.createdAt.formatted(date: .abbreviated, time: .shortened)):
+
+        Решения и важные факты:
+        \(list(checkpoint.decisions))
+
+        Сжатый прогресс и недавний контекст:
+        \(list(checkpoint.progress))
+
+        Открытые темы и риски:
+        \(list(checkpoint.knownIssues))
+
+        Следующий естественный шаг:
+        \(limited(checkpoint.nextStep))
         """
     }
 

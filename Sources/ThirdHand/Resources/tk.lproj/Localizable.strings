@@ -226,6 +226,8 @@
 "Аватар агента %@" = "Ageniň awatary %@";
 "Добавьте фотографию" = "Surat goşuň";
 "Фото загружено" = "Surat ýüklendi";
+"Изменить фото" = "Suraty üýtget";
+"Удалить фото" = "Suraty aýyr";
 "PNG, JPG или HEIC · до 25 МБ" = "PNG, JPG ýa-da HEIC · 25 MB-a çenli";
 "Цвет аватара без фото" = "Suratsyz awatar reňki";
 "Загрузить фото…" = "Suraty ýükläň…";
@@ -387,3 +389,10 @@
 "При переключении CLI OpenRouter получает промпт личности, спецификацию, semantic handoff, последние 10 сообщений, ограниченный хвост вывода CLI и Git-сводку. Полный diff и вложения отдельно не отправляются; вывод CLI может содержать фрагменты, которые успел показать агент." = "CLI üýtgedilende, OpenRouter şahsyýet promptyny, spesifikasiýany, semantic handoff, soňky 10 habary, çäkli çykaryş ugry CLI we Git-goşundygy alýar. Doly diff we goşundylar aýratyn iberilmeýär; çykaryş CLI agentiň görkezmäge mümkinçilik tapan böleklerini öz içine alyp biler.";
 "openrouter/free может выбирать разных бесплатных провайдеров; для них действуют собственные правила хранения данных и более низкие лимиты доступности." = "openrouter/free dürli mugt üpjün edijileri saýlap biler; olaryň maglumat saklama düzgünleri we elýeterlilik çäklendirmeleri has pes bolýar.";
 "API-ключ передаётся только OpenRouter в заголовке авторизации, хранится в Keychain и не записывается в UserDefaults или state.json." = "API-açar diňe OpenRouter tassyklama başlygynyň içinde geçirilýär, Keychain-de saklanýar we UserDefaults ýa-da state.json-a ýazylmaýar.";
+
+/* App onboarding */
+"Добро пожаловать в Third Hand" = "Third Hand-e hoş geldiňiz";
+"Сначала настройте язык и доступность. Всё это можно изменить позже." = "Ilki dili we elýeterlilik sazlamalaryny düzüň. Bularyň hemmesini soň üýtgedip bilersiňiz.";
+"Открыть настройки macOS" = "macOS sazlamalaryny aç";
+"Продолжить" = "Dowam et";
+"Назад" = "Yza";

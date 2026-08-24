@@ -5,6 +5,8 @@ MODE="${1:-run}"
 APP_NAME="ThirdHand"
 BUNDLE_ID="studio.moonbay.ThirdHand"
 MIN_SYSTEM_VERSION="14.0"
+APP_VERSION="0.3.0"
+APP_BUILD="3"
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DIST_DIR="$ROOT_DIR/dist"
@@ -14,6 +16,13 @@ APP_MACOS="$APP_CONTENTS/MacOS"
 APP_RESOURCES="$APP_CONTENTS/Resources"
 APP_BINARY="$APP_MACOS/$APP_NAME"
 INFO_PLIST="$APP_CONTENTS/Info.plist"
+APP_ICON_SOURCE="$ROOT_DIR/Sources/ThirdHand/Resources/ThirdHand.icns"
+APP_ICON_NAME="ThirdHand.icns"
+
+if [[ "$MODE" == "--version" || "$MODE" == "version" ]]; then
+  echo "$APP_VERSION ($APP_BUILD)"
+  exit 0
+fi
 
 pkill -x "$APP_NAME" >/dev/null 2>&1 || true
 
@@ -43,6 +52,8 @@ if [[ -d "$RESOURCE_BUNDLE" ]]; then
   done
 fi
 
+cp "$APP_ICON_SOURCE" "$APP_RESOURCES/$APP_ICON_NAME"
+
 cat >"$INFO_PLIST" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -56,6 +67,12 @@ cat >"$INFO_PLIST" <<PLIST
   <string>Third Hand</string>
   <key>CFBundleDisplayName</key>
   <string>Third Hand</string>
+  <key>CFBundleShortVersionString</key>
+  <string>$APP_VERSION</string>
+  <key>CFBundleVersion</key>
+  <string>$APP_BUILD</string>
+  <key>CFBundleIconFile</key>
+  <string>$APP_ICON_NAME</string>
   <key>CFBundleDevelopmentRegion</key>
   <string>ru</string>
   <key>CFBundleLocalizations</key>
@@ -127,7 +144,7 @@ case "$MODE" in
     exit 1
     ;;
   *)
-    echo "usage: $0 [run|--debug|--logs|--telemetry|--verify]" >&2
+    echo "usage: $0 [run|--debug|--logs|--telemetry|--verify|--version]" >&2
     exit 2
     ;;
 esac

@@ -600,6 +600,21 @@ final class AppStore {
             break
         }
 
+        if attachments.isEmpty, trimmedText.hasPrefix("/") {
+            do {
+                if let command = try ChatSlashCommandParser.parse(trimmedText) {
+                    await executeSlashCommand(command, taskID: taskID)
+                }
+            } catch {
+                appendCommandMessage(
+                    (error as? LocalizedError)?.errorDescription
+                        ?? error.localizedDescription,
+                    to: taskID
+                )
+            }
+            return
+        }
+
         let interactionMode = submittedTask.effectiveInteractionMode.resolved(
             for: messageText,
             personalityPrompt: submittedTask.effectivePersona.prompt,
@@ -762,12 +777,18 @@ final class AppStore {
                 workingDirectory = taskSnapshot.repositoryPath
                 isGitRepository = repositoryContext.isGitRepository
             } else {
+                workingDirectory = conversationWorkingDirectory(for: taskID)
                 prompt = ConversationEnvelopeBuilder.build(
                     task: taskSnapshot,
                     currentInstruction: messageText,
-                    attachments: retainedAttachments
+                    attachments: retainedAttachments,
+                    includesRecentHistory: !resumesNativeSession(
+                        target: target,
+                        task: taskSnapshot,
+                        interactionMode: interactionMode,
+                        workingDirectory: workingDirectory
+                    )
                 )
-                workingDirectory = conversationWorkingDirectory(for: taskID)
                 isGitRepository = false
             }
 
@@ -776,7 +797,7 @@ final class AppStore {
             }
 
             do {
-                let responseText = try await execute(
+                let response = try await execute(
                     target: target,
                     attemptID: attemptID,
                     taskID: taskID,
@@ -787,6 +808,7 @@ final class AppStore {
                     isGitRepository: isGitRepository,
                     interactionMode: interactionMode
                 )
+                let responseText = response.text
                 guard activeRuns[taskID]?.attemptID == attemptID else {
                     break executionLoop
                 }
@@ -812,6 +834,18 @@ final class AppStore {
                     liveGitSnapshots[taskID] = completionSnapshot
                 }
                 mutateTask(taskID) { task in
+                    if case let .cli(agent) = target,
+                       agent.supportsNativeSessionResume,
+                       let sessionID = response.nativeSessionID {
+                        Self.storeSessionBinding(
+                            sessionID: sessionID,
+                            agent: agent,
+                            interactionMode: interactionMode,
+                            workingDirectory: workingDirectory,
+                            modelID: taskSnapshot.agentConfiguration?[.model],
+                            in: &task
+                        )
+                    }
                     if interactionMode == .workspace {
                         task.gitSnapshot = completionSnapshot
                     }
@@ -2644,6 +2678,8 @@ final class AppStore {
                 AgentOptionID.executionMode.rawValue: "plan",
                 AgentOptionID.sandboxMode.rawValue: "enabled"
             ]
+        case .deepSeek:
+            [AgentOptionID.sandboxMode.rawValue: "read-only"]
         }
     }
 
@@ -2733,6 +2769,11 @@ final class AppStore {
             let previousName = previousTarget.shortName
             let nextName = nextTarget.shortName
             let isConversation = interactionMode == .conversation
+            let portableHandoff = compressedHandoff
+                ?? PortableContextBuilder.localFallback(
+                    for: task,
+                    interactionMode: interactionMode
+                )
             if !isConversation {
                 task.gitSnapshot = snapshot
             }
@@ -2748,12 +2789,12 @@ final class AppStore {
                 )
             }
 
-            if isConversation, let compressedHandoff {
+            if isConversation {
                 task.conversationHandoff = ConversationHandoff(
-                    facts: compressedHandoff.decisions,
-                    recentContext: compressedHandoff.progress,
-                    openThreads: compressedHandoff.knownIssues,
-                    nextReply: compressedHandoff.nextStep,
+                    facts: portableHandoff.decisions,
+                    recentContext: portableHandoff.progress,
+                    openThreads: portableHandoff.knownIssues,
+                    nextReply: portableHandoff.nextStep,
                     updatedAt: .now
                 )
             } else if let compressedHandoff {
@@ -2766,6 +2807,11 @@ final class AppStore {
                 task.handoff.knownIssues = compressedHandoff.knownIssues
                 task.handoff.nextStep = compressedHandoff.nextStep
             }
+            task.portableContextCheckpoint = PortableContextBuilder.checkpoint(
+                from: portableHandoff,
+                task: task,
+                interactionMode: interactionMode
+            )
             if !isConversation {
                 task.handoff.knownIssues.removeAll { $0 == issue }
                 task.handoff.knownIssues = Array(
@@ -2818,6 +2864,492 @@ final class AppStore {
         }
     }
 
+    private func executeSlashCommand(
+        _ command: ChatSlashCommand,
+        taskID: UUID
+    ) async {
+        guard let task = tasks.first(where: { $0.id == taskID }) else { return }
+
+        switch command {
+        case .help:
+            return
+
+        case .context:
+            appendCommandMessage(contextDescription(for: task), to: taskID)
+
+        case .compact:
+            await createPortableCheckpoint(
+                taskID: taskID,
+                resetsNativeSessions: true
+            )
+
+        case .handoff:
+            await createPortableCheckpoint(
+                taskID: taskID,
+                resetsNativeSessions: false
+            )
+
+        case let .model(requestedModel):
+            executeModelCommand(
+                requestedModel,
+                taskID: taskID,
+                task: task
+            )
+
+        case let .session(sessionCommand):
+            executeSessionCommand(
+                sessionCommand,
+                taskID: taskID,
+                task: task
+            )
+        }
+    }
+
+    private func executeModelCommand(
+        _ requestedModel: String?,
+        taskID: UUID,
+        task: CodingTask
+    ) {
+        switch preferredExecutionTarget(for: task) {
+        case let .api(target):
+            let models = availableAPITargets
+                .filter { $0.provider == target.provider }
+                .map(\.modelID)
+            guard let requestedModel else {
+                appendCommandMessage(
+                    "Текущая модель: \(target.displayName).\nДоступно: \(models.isEmpty ? "список моделей не загружен" : models.joined(separator: ", ")).",
+                    to: taskID
+                )
+                return
+            }
+            guard let selected = models.first(where: {
+                $0.caseInsensitiveCompare(requestedModel) == .orderedSame
+            }) else {
+                appendCommandMessage(
+                    "Модель «\(requestedModel)» не найдена для \(target.provider.displayName). Введите /model, чтобы увидеть список.",
+                    to: taskID
+                )
+                return
+            }
+            setAgentOption(.apiModel, to: selected, for: taskID)
+            appendCommandMessage(
+                "Модель API изменена: \(target.provider.displayName) · \(selected).",
+                to: taskID
+            )
+
+        case let .cli(agent):
+            let capabilitySet = capabilities(for: agent)
+            let currentModel = task.agentConfiguration?[.model]
+                ?? capabilitySet.defaultModelID
+            guard let requestedModel else {
+                let options = capabilitySet.models.map(\.id)
+                appendCommandMessage(
+                    "Текущая модель \(agent.shortName): \(currentModel.isEmpty ? "управляется CLI" : currentModel).\nДоступно: \(options.isEmpty ? "CLI не публикует список моделей" : options.joined(separator: ", ")).",
+                    to: taskID
+                )
+                return
+            }
+            guard let selected = capabilitySet.models.first(where: { model in
+                model.id.caseInsensitiveCompare(requestedModel) == .orderedSame
+                    || model.title.caseInsensitiveCompare(requestedModel) == .orderedSame
+            }) else {
+                appendCommandMessage(
+                    "Модель «\(requestedModel)» не найдена для \(agent.shortName). Введите /model, чтобы увидеть список.",
+                    to: taskID
+                )
+                return
+            }
+            setAgentOption(.model, to: selected.id, for: taskID)
+            appendCommandMessage(
+                "Модель \(agent.shortName) изменена на \(selected.title). Существующая нативная сессия будет продолжена с новым параметром модели.",
+                to: taskID
+            )
+        }
+    }
+
+    private func executeSessionCommand(
+        _ command: ChatSessionCommand,
+        taskID: UUID,
+        task: CodingTask
+    ) {
+        guard case let .cli(agent) = preferredExecutionTarget(for: task) else {
+            appendCommandMessage(
+                "Текущий исполнитель работает через API. Нативный CLI resume не используется; непрерывность обеспечивает checkpoint в state.json.",
+                to: taskID
+            )
+            return
+        }
+        guard agent.supportsNativeSessionResume else {
+            appendCommandMessage(
+                "\(agent.shortName) в текущем headless-режиме Third Hand не предоставляет совместимый resume. Используйте /compact или /handoff: переносимый checkpoint сохраняется в state.json.",
+                to: taskID
+            )
+            return
+        }
+
+        let interactionMode = commandInteractionMode(for: task)
+        let scope = AgentSessionScope(interactionMode: interactionMode)
+        let workingDirectory = workingDirectory(
+            for: task,
+            interactionMode: interactionMode
+        )
+        let binding = Self.sessionBinding(
+            in: task,
+            agent: agent,
+            scope: scope,
+            workingDirectory: workingDirectory
+        )
+
+        switch command {
+        case .status:
+            let current = binding.map {
+                "Активная сессия \(agent.shortName) [\(scope.title)]: \($0.sessionID)\nМодель: \($0.modelID ?? "по умолчанию")\nОбновлена: \($0.updatedAt.formatted(date: .abbreviated, time: .shortened))"
+            } ?? "Для \(agent.shortName) [\(scope.title)] ещё нет привязанной нативной сессии. Следующее сообщение создаст её автоматически."
+            let otherBindings = (task.nativeSessionBindings ?? [])
+                .filter { $0.sessionID != binding?.sessionID }
+                .map { "- \($0.agent.shortName) [\($0.scope.title)]: \($0.sessionID)" }
+            appendCommandMessage(
+                otherBindings.isEmpty
+                    ? current
+                    : current + "\n\nДругие сохранённые сессии:\n" + otherBindings.joined(separator: "\n"),
+                to: taskID
+            )
+
+        case .new:
+            clearSessionBindings(
+                taskID: taskID,
+                agent: agent,
+                scope: scope
+            )
+            appendCommandMessage(
+                "Привязка \(agent.shortName) [\(scope.title)] сброшена. Следующее сообщение начнёт новую нативную сессию; локальная история и checkpoint сохранены.",
+                to: taskID
+            )
+
+        case .forget:
+            clearSessionBindings(
+                taskID: taskID,
+                agent: agent,
+                scope: scope
+            )
+            appendCommandMessage(
+                "Third Hand забыл привязку \(agent.shortName) [\(scope.title)]. Файлы сессии самого CLI не удалялись.",
+                to: taskID
+            )
+
+        case let .resume(sessionID):
+            mutateTask(taskID) { updatedTask in
+                Self.storeSessionBinding(
+                    sessionID: sessionID,
+                    agent: agent,
+                    interactionMode: interactionMode,
+                    workingDirectory: workingDirectory,
+                    modelID: updatedTask.agentConfiguration?[.model],
+                    in: &updatedTask
+                )
+            }
+            appendCommandMessage(
+                "Привязана сессия \(agent.shortName): \(sessionID). Следующее сообщение будет отправлено через native resume.",
+                to: taskID
+            )
+        }
+    }
+
+    private func createPortableCheckpoint(
+        taskID: UUID,
+        resetsNativeSessions: Bool
+    ) async {
+        guard activeRuns[taskID] == nil,
+              let task = tasks.first(where: { $0.id == taskID })
+        else {
+            return
+        }
+        let interactionMode = commandInteractionMode(for: task)
+        let target = preferredExecutionTarget(for: task)
+        let attemptID = UUID()
+        activeRuns[taskID] = AgentRunState(
+            attemptID: attemptID,
+            agent: target.fallbackAgentKind,
+            executionTarget: target,
+            interactionMode: interactionMode,
+            phase: .compressingContext,
+            startedAt: .now
+        )
+        liveAgentOutputs[taskID] = .empty
+
+        let request = PortableContextBuilder.compressionRequest(
+            for: task,
+            interactionMode: interactionMode,
+            agent: target.fallbackAgentKind
+        )
+        let compressionTask = Swift.Task { [handoffCompressor] in
+            try await handoffCompressor.compress(request)
+        }
+        activeHandoffCompressionTasks[taskID] = compressionTask
+
+        var usedLocalFallback = false
+        let compressed: CompressedAgentHandoff
+        do {
+            if let remote = try await compressionTask.value {
+                compressed = remote
+            } else {
+                usedLocalFallback = true
+                compressed = PortableContextBuilder.localFallback(
+                    for: task,
+                    interactionMode: interactionMode
+                )
+            }
+        } catch is CancellationError {
+            activeHandoffCompressionTasks[taskID] = nil
+            await taskOrchestrator.discardPendingCancellation(attemptID: attemptID)
+            activeRuns[taskID] = nil
+            liveAgentOutputs[taskID] = nil
+            appendCommandMessage("Сжатие контекста остановлено.", to: taskID)
+            return
+        } catch {
+            usedLocalFallback = true
+            compressed = PortableContextBuilder.localFallback(
+                for: task,
+                interactionMode: interactionMode
+            )
+        }
+        activeHandoffCompressionTasks[taskID] = nil
+
+        guard activeRuns[taskID]?.attemptID == attemptID,
+              activeRuns[taskID]?.phase != .stopping
+        else {
+            await taskOrchestrator.discardPendingCancellation(attemptID: attemptID)
+            activeRuns[taskID] = nil
+            liveAgentOutputs[taskID] = nil
+            appendCommandMessage("Сжатие контекста остановлено.", to: taskID)
+            return
+        }
+
+        let latestTask = tasks.first(where: { $0.id == taskID }) ?? task
+        let checkpoint = PortableContextBuilder.checkpoint(
+            from: compressed,
+            task: latestTask,
+            interactionMode: interactionMode
+        )
+        mutateTask(taskID) { updatedTask in
+            updatedTask.portableContextCheckpoint = checkpoint
+            if interactionMode == .conversation {
+                updatedTask.conversationHandoff = nil
+            } else {
+                updatedTask.handoff.decisions = compressed.decisions
+                updatedTask.handoff.progress = compressed.progress
+                updatedTask.handoff.knownIssues = compressed.knownIssues
+                updatedTask.handoff.nextStep = compressed.nextStep
+                updatedTask.handoff.updatedAt = .now
+            }
+            if resetsNativeSessions {
+                let scope = AgentSessionScope(interactionMode: interactionMode)
+                updatedTask.nativeSessionBindings?.removeAll { $0.scope == scope }
+                if updatedTask.nativeSessionBindings?.isEmpty == true {
+                    updatedTask.nativeSessionBindings = nil
+                }
+            }
+            var messages = updatedTask.messages ?? []
+            let source = usedLocalFallback ? "локально" : "через \(compressed.modelID)"
+            let effect = resetsNativeSessions
+                ? " Следующее сообщение начнёт чистую нативную сессию."
+                : " Checkpoint готов для handoff без разрыва текущей сессии."
+            messages.append(
+                TaskMessage(
+                    role: .system,
+                    text: "Контекст сжат \(source): \(checkpoint.sourceMessageCount) сообщений, примерно \(checkpoint.estimatedOriginalTokens.formatted()) токенов исходной истории.\(effect)"
+                )
+            )
+            updatedTask.messages = messages
+            updatedTask.activity.insert(
+                ActivityEvent(
+                    title: resetsNativeSessions ? "Контекст сжат" : "Handoff подготовлен",
+                    detail: "Checkpoint сохранён в state.json (\(source)).",
+                    systemImage: "arrow.triangle.2.circlepath"
+                ),
+                at: 0
+            )
+        }
+        activeRuns[taskID] = nil
+        liveAgentOutputs[taskID] = nil
+    }
+
+    private func contextDescription(for task: CodingTask) -> String {
+        let interactionMode = commandInteractionMode(for: task)
+        let scope = AgentSessionScope(interactionMode: interactionMode)
+        let target = preferredExecutionTarget(for: task)
+        let history = task.chatMessages.filter { $0.role != .system }
+        let checkpoint = task.portableContextCheckpoint.flatMap {
+            $0.scope == scope ? $0 : nil
+        }
+
+        let contextLines: [String]
+        if interactionMode == .conversation {
+            let inspection = ConversationEnvelopeBuilder.inspect(task: task)
+            contextLines = [
+                "Режим: \(scope.title)",
+                "История в приложении: \(inspection.totalMessages) сообщений",
+                "В следующий stateless prompt: \(inspection.includedMessages) сообщений; скрыто checkpoint/лимитом: \(inspection.omittedMessages)",
+                "Оценка prompt-контекста: ~\(inspection.estimatedTokens.formatted()) токенов (\(inspection.estimatedCharacters.formatted()) символов)"
+            ]
+        } else {
+            let semanticCharacters = (
+                task.handoff.decisions
+                    + task.handoff.progress
+                    + task.handoff.knownIssues
+            ).reduce(task.handoff.nextStep.count) { $0 + $1.count }
+            contextLines = [
+                "Режим: \(scope.title)",
+                "История в приложении: \(history.count) сообщений",
+                "В workspace prompt передаётся semantic handoff и актуальный Git-контекст, а не полный transcript",
+                "Semantic handoff: ~\(max(1, semanticCharacters / 4).formatted()) токенов"
+            ]
+        }
+
+        let sessionLine: String
+        switch target {
+        case let .cli(agent) where agent.supportsNativeSessionResume:
+            let workingDirectory = workingDirectory(
+                for: task,
+                interactionMode: interactionMode
+            )
+            if let binding = Self.sessionBinding(
+                in: task,
+                agent: agent,
+                scope: scope,
+                workingDirectory: workingDirectory
+            ) {
+                sessionLine = "Native resume: \(agent.shortName) · \(binding.sessionID)"
+            } else {
+                sessionLine = "Native resume: \(agent.shortName), сессия будет создана при следующем сообщении"
+            }
+        case let .cli(agent):
+            sessionLine = "Native resume: \(agent.shortName) headless не поддерживается; используется checkpoint"
+        case let .api(apiTarget):
+            sessionLine = "Исполнитель: \(apiTarget.displayName) API; используется checkpoint"
+        }
+
+        let checkpointLine = checkpoint.map {
+            "Checkpoint: \($0.sourceMessageCount) сообщений до \($0.createdAt.formatted(date: .abbreviated, time: .shortened)); источник: \($0.modelID ?? "локальный")"
+        } ?? "Checkpoint: ещё не создан"
+        return (contextLines + [
+            checkpointLine,
+            sessionLine,
+            "Постоянное хранилище: \(persistence.taskStatePath)"
+        ]).joined(separator: "\n")
+    }
+
+    private func commandInteractionMode(for task: CodingTask) -> AgentInteractionMode {
+        guard task.effectiveInteractionMode == .automatic else {
+            return task.effectiveInteractionMode
+        }
+        guard let latestUserMessage = task.chatMessages.last(where: { $0.role == .user })?.text else {
+            return AgentInteractionMode.inferred(
+                from: task.effectivePersona.prompt
+            )
+        }
+        return task.effectiveInteractionMode.resolved(
+            for: latestUserMessage,
+            personalityPrompt: task.effectivePersona.prompt,
+            recentMessages: task.chatMessages
+                .filter { $0.role != .system }
+                .suffix(6)
+                .map(\.text)
+        )
+    }
+
+    private func workingDirectory(
+        for task: CodingTask,
+        interactionMode: AgentInteractionMode
+    ) -> String {
+        interactionMode == .workspace
+            ? task.repositoryPath
+            : conversationWorkingDirectory(for: task.id)
+    }
+
+    private func appendCommandMessage(_ text: String, to taskID: UUID) {
+        mutateTask(taskID) { task in
+            var messages = task.messages ?? []
+            messages.append(TaskMessage(role: .system, text: text))
+            task.messages = messages
+        }
+    }
+
+    private func clearSessionBindings(
+        taskID: UUID,
+        agent: AgentKind,
+        scope: AgentSessionScope
+    ) {
+        mutateTask(taskID) { task in
+            task.nativeSessionBindings?.removeAll {
+                $0.agent == agent && $0.scope == scope
+            }
+            if task.nativeSessionBindings?.isEmpty == true {
+                task.nativeSessionBindings = nil
+            }
+        }
+    }
+
+    private static func sessionBinding(
+        in task: CodingTask,
+        agent: AgentKind,
+        scope: AgentSessionScope,
+        workingDirectory: String
+    ) -> AgentSessionBinding? {
+        let normalizedDirectory = normalizedSessionDirectory(workingDirectory)
+        return task.nativeSessionBindings?.first {
+            $0.agent == agent
+                && $0.scope == scope
+                && normalizedSessionDirectory($0.workingDirectory) == normalizedDirectory
+        }
+    }
+
+    private static func storeSessionBinding(
+        sessionID: String,
+        agent: AgentKind,
+        interactionMode: AgentInteractionMode,
+        workingDirectory: String,
+        modelID: String?,
+        in task: inout CodingTask
+    ) {
+        let normalizedID = sessionID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedID.isEmpty else { return }
+        let scope = AgentSessionScope(interactionMode: interactionMode)
+        var bindings = task.nativeSessionBindings ?? []
+        if let index = bindings.firstIndex(where: {
+            $0.agent == agent && $0.scope == scope
+        }) {
+            let createdAt = bindings[index].createdAt
+            bindings[index] = AgentSessionBinding(
+                agent: agent,
+                scope: scope,
+                sessionID: normalizedID,
+                workingDirectory: normalizedSessionDirectory(workingDirectory),
+                modelID: modelID,
+                createdAt: createdAt,
+                updatedAt: .now
+            )
+        } else {
+            bindings.append(
+                AgentSessionBinding(
+                    agent: agent,
+                    scope: scope,
+                    sessionID: normalizedID,
+                    workingDirectory: normalizedSessionDirectory(workingDirectory),
+                    modelID: modelID
+                )
+            )
+        }
+        task.nativeSessionBindings = bindings
+    }
+
+    private static func normalizedSessionDirectory(_ path: String) -> String {
+        URL(fileURLWithPath: path)
+            .standardizedFileURL
+            .resolvingSymlinksInPath()
+            .path
+    }
+
     private func mutateTask(_ id: UUID, mutation: (inout CodingTask) -> Void) {
         guard let index = tasks.firstIndex(where: { $0.id == id }) else { return }
         mutation(&tasks[index])
@@ -2865,7 +3397,7 @@ final class AppStore {
         attachments: [TaskAttachment],
         isGitRepository: Bool,
         interactionMode: AgentInteractionMode
-    ) async throws -> String {
+    ) async throws -> AgentExecutionResponse {
         switch target {
         case let .cli(agent):
             guard let executablePath = agentInstallations
@@ -2888,7 +3420,13 @@ final class AppStore {
                 prompt: prompt,
                 configuration: configuration,
                 attachments: attachments,
-                isGitRepository: isGitRepository
+                isGitRepository: isGitRepository,
+                nativeSession: nativeSessionDirective(
+                    agent: agent,
+                    task: task,
+                    interactionMode: interactionMode,
+                    workingDirectory: repositoryPath
+                )
             )
             let response = try await taskOrchestrator.execute(request) { [weak self] output in
                 await self?.recordLiveAgentOutput(
@@ -2897,7 +3435,7 @@ final class AppStore {
                     attemptID: attemptID
                 )
             }
-            return response.text
+            return response
 
         case let .api(apiTarget):
             let responseTask = Swift.Task { [apiExecutor] in
@@ -2913,12 +3451,58 @@ final class AppStore {
             do {
                 let response = try await responseTask.value
                 activeAPIExecutionTasks[taskID] = nil
-                return response.text
+                return AgentExecutionResponse(
+                    text: response.text,
+                    exitCode: 0,
+                    nativeSessionID: nil
+                )
             } catch {
                 activeAPIExecutionTasks[taskID] = nil
                 throw error
             }
         }
+    }
+
+    private func nativeSessionDirective(
+        agent: AgentKind,
+        task: CodingTask,
+        interactionMode: AgentInteractionMode,
+        workingDirectory: String
+    ) -> AgentNativeSessionDirective {
+        guard agent.supportsNativeSessionResume else { return .disabled }
+        let scope = AgentSessionScope(interactionMode: interactionMode)
+        if let binding = Self.sessionBinding(
+            in: task,
+            agent: agent,
+            scope: scope,
+            workingDirectory: workingDirectory
+        ) {
+            return .resume(id: binding.sessionID)
+        }
+
+        if agent == .claudeCode {
+            return .start(preferredID: UUID().uuidString.lowercased())
+        }
+        return .start()
+    }
+
+    private func resumesNativeSession(
+        target: AgentExecutionTarget,
+        task: CodingTask,
+        interactionMode: AgentInteractionMode,
+        workingDirectory: String
+    ) -> Bool {
+        guard case let .cli(agent) = target,
+              agent.supportsNativeSessionResume
+        else {
+            return false
+        }
+        return Self.sessionBinding(
+            in: task,
+            agent: agent,
+            scope: AgentSessionScope(interactionMode: interactionMode),
+            workingDirectory: workingDirectory
+        ) != nil
     }
 
     private func resolvedGroupConfiguration(

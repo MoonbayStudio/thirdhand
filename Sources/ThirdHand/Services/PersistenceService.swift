@@ -15,6 +15,8 @@ struct GroupChatPersistenceLoadState {
 struct PersistenceService {
     private let stateURL: URL
 
+    var taskStatePath: String { stateURL.path }
+
     private var backupURL: URL {
         stateURL.appendingPathExtension("backup")
     }

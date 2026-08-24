@@ -96,9 +96,12 @@ struct AgentProfileInspectorView: View {
         }
         .onChange(of: draft.agentKind) { oldValue, newValue in
             guard oldValue != newValue, draft.executionSource == .cli else { return }
-            draft.configuration = TaskAgentConfiguration(
-                values: [AgentOptionID.model.rawValue: capabilities.defaultModelID]
-            )
+            let defaultModelID = capabilities.defaultModelID
+            draft.configuration = defaultModelID.isEmpty
+                ? TaskAgentConfiguration()
+                : TaskAgentConfiguration(
+                    values: [AgentOptionID.model.rawValue: defaultModelID]
+                )
         }
         .onChange(of: draft.executionSource) { _, source in
             if source == .api, draft.apiModelID.isEmpty {
@@ -210,6 +213,7 @@ struct AgentProfileInspectorView: View {
                 imageData: $draft.avatarImageData,
                 color: $draft.avatarColor,
                 name: draft.name,
+                showsPreview: false,
                 onChoosePhoto: {
                     importTarget = .avatar
                     isChoosingFile = true
@@ -322,9 +326,11 @@ struct AgentProfileInspectorView: View {
                         }
                     }
 
-                    Picker("Модель", selection: modelBinding) {
-                        ForEach(capabilities.models) { model in
-                            Text(model.title).tag(model.id)
+                    if !capabilities.models.isEmpty {
+                        Picker("Модель", selection: modelBinding) {
+                            ForEach(capabilities.models) { model in
+                                Text(model.title).tag(model.id)
+                            }
                         }
                     }
                 } else {

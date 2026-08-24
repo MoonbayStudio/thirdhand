@@ -35,6 +35,11 @@ final class AppModelsTests: XCTestCase {
         XCTAssertTrue(AgentKind.antigravity.commandNames.contains("antigravity"))
     }
 
+    func testDeepSeekPrefersInstalledHomebrewHarness() {
+        XCTAssertEqual(AgentKind.deepSeek.commandNames.first, "/opt/homebrew/bin/dsh")
+        XCTAssertTrue(AgentKind.deepSeek.commandNames.contains("dsh"))
+    }
+
     func testNewTaskStartsWithEmptyChat() {
         let task = CodingTask(
             title: "Chat task",
@@ -388,5 +393,10 @@ final class AppModelsTests: XCTestCase {
         XCTAssertTrue(parameterIDs.contains(.executionMode))
         XCTAssertTrue(parameterIDs.contains(.sandboxMode))
         XCTAssertFalse(parameterIDs.contains(.reasoningEffort))
+
+        let deepSeek = try XCTUnwrap(AgentCapabilityCatalog.fallback[.deepSeek])
+        let deepSeekParameterIDs = Set(deepSeek.parameters(selectedModelID: nil).map(\.id))
+        XCTAssertEqual(deepSeekParameterIDs, [.sandboxMode])
+        XCTAssertTrue(deepSeek.models.isEmpty)
     }
 }

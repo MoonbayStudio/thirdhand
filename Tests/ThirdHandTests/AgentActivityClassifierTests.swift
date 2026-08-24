@@ -14,6 +14,15 @@ final class AgentActivityClassifierTests: XCTestCase {
 
         XCTAssertFalse(conversation.presentsDetailedActivity)
         XCTAssertTrue(run(phase: .running).presentsDetailedActivity)
+
+        let conversationCompression = AgentRunState(
+            attemptID: UUID(),
+            agent: .codex,
+            interactionMode: .conversation,
+            phase: .compressingContext,
+            startedAt: .now
+        )
+        XCTAssertTrue(conversationCompression.presentsDetailedActivity)
     }
 
     func testPhaseOverridesOutputClassification() {

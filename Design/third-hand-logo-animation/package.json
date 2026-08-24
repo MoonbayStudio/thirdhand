@@ -1,0 +1,40 @@
+{
+  "name": "third-hand-logo-animation",
+  "version": "1.0.0",
+  "description": "Third Hand logo reveal animation built with Remotion",
+  "repository": {},
+  "license": "UNLICENSED",
+  "private": true,
+  "dependencies": {
+    "@remotion/cli": "4.0.516",
+    "react": "19.2.3",
+    "react-dom": "19.2.3",
+    "remotion": "4.0.516"
+  },
+  "devDependencies": {
+    "@remotion/eslint-config-flat": "4.0.516",
+    "@types/pngjs": "^6.0.5",
+    "@types/react": "19.2.7",
+    "@types/web": "0.0.166",
+    "eslint": "9.19.0",
+    "pngjs": "^7.0.0",
+    "prettier": "3.8.1",
+    "typescript": "5.9.3"
+  },
+  "scripts": {
+    "predev": "npm run extract-assets",
+    "dev": "remotion studio",
+    "build": "remotion bundle",
+    "extract-assets": "node scripts/extract-assets.mjs",
+    "upgrade": "remotion upgrade",
+    "lint": "eslint src && tsc",
+    "prerender": "npm run extract-assets",
+    "render": "remotion render --image-format=png --pixel-format=yuva444p10le --codec=prores --prores-profile=4444 ThirdHandLogo out/third-hand-logo-transparent.mov",
+    "render:webm": "remotion render --image-format=png --pixel-format=yuva420p --codec=vp9 ThirdHandLogo out/third-hand-logo-transparent.webm",
+    "still": "remotion still ThirdHandLogo out/third-hand-logo-final.png --frame=209",
+    "still:dark": "remotion still ThirdHandLogoDark out/third-hand-logo-dark-check.png --frame=209"
+  },
+  "sideEffects": [
+    "*.css"
+  ]
+}

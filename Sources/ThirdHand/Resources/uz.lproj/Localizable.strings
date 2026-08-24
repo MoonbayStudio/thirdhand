@@ -226,6 +226,8 @@
 "Аватар агента %@" = "Agent avatar %@";
 "Добавьте фотографию" = "Surat qo'shing";
 "Фото загружено" = "Surat yuklandi";
+"Изменить фото" = "Suratni o‘zgartirish";
+"Удалить фото" = "Suratni o‘chirish";
 "PNG, JPG или HEIC · до 25 МБ" = "PNG, JPG yoki HEIC · 25 MB gacha";
 "Цвет аватара без фото" = "Rasmsiz avatar rangi";
 "Загрузить фото…" = "Surat yuklash...";
@@ -387,3 +389,10 @@
 "При переключении CLI OpenRouter получает промпт личности, спецификацию, semantic handoff, последние 10 сообщений, ограниченный хвост вывода CLI и Git-сводку. Полный diff и вложения отдельно не отправляются; вывод CLI может содержать фрагменты, которые успел показать агент." = "Oʻtish paytida CLI OpenRouter identifikatsiya soʻrovini, spetsifikatsiyani, semantik uzatishni, oxirgi 10 xabarni, CLI8_2 va CLI2_2_2-sonli chiqish dumini oladi. xulosa. To'liq farq va qo'shimchalar alohida yuborilmaydi; CLI chiqishida agent ko'rsatishga muvaffaq bo'lgan qismlar bo'lishi mumkin.";
 "openrouter/free может выбирать разных бесплатных провайдеров; для них действуют собственные правила хранения данных и более низкие лимиты доступности." = "openrouter/free turli xil bepul provayderlarni tanlashi mumkin; ular o'zlarining ma'lumotlarni saqlash qoidalariga va kamroq mavjudlik chegaralariga bo'ysunadilar.";
 "API-ключ передаётся только OpenRouter в заголовке авторизации, хранится в Keychain и не записывается в UserDefaults или state.json." = "API-kalit faqat avtorizatsiya sarlavhasidagi OpenRouter-ga uzatiladi, Keychain-da saqlanadi va UserDefaults yoki state.json-ga yozilmaydi.";
+
+/* App onboarding */
+"Добро пожаловать в Third Hand" = "Third Hand’ga xush kelibsiz";
+"Сначала настройте язык и доступность. Всё это можно изменить позже." = "Avval til va maxsus imkoniyatlarni sozlang. Bularning barchasini keyinroq o‘zgartirishingiz mumkin.";
+"Открыть настройки macOS" = "macOS sozlamalarini ochish";
+"Продолжить" = "Davom etish";
+"Назад" = "Orqaga";
